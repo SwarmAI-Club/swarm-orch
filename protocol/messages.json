@@ -1,0 +1,72 @@
+{
+  "$schema": "SwarmAI Mesh Protocol v0.1",
+  "description": "5 種 JSON message，Node router <-> Python worker 互通。Transport Phase 1 = HTTP over Tailscale (100.x)，協議層抽象可換 libp2p/MQ。",
+  "messages": {
+    "node_register": {
+      "from": "worker",
+      "to": "router",
+      "purpose": "Worker 上線時註冊自身能力",
+      "fields": {
+        "type": { "const": "node_register" },
+        "node_id": "string (unique)",
+        "capabilities": "string[] (Jaccard matching 用)",
+        "model": "string (e.g. Qwopus-27B)",
+        "gpu": "string (e.g. 2080Ti 22GB)",
+        "max_context": "number (tokens)",
+        "speed": "string (optional, t/s)"
+      }
+    },
+    "beacon": {
+      "from": "router",
+      "to": "worker",
+      "purpose": "Router 廣播任務，等 worker 回覆是否有 capability 接",
+      "fields": {
+        "type": { "const": "beacon" },
+        "beacon_id": "string (uuid)",
+        "task": "string (描述)",
+        "required_capabilities": "string[]",
+        "priority": "number (0-1)",
+        "deadline": "ISO timestamp (optional)"
+      }
+    },
+    "beacon_response": {
+      "from": "worker",
+      "to": "router",
+      "purpose": "Worker 回覆：有無能力 + 信心分",
+      "fields": {
+        "type": { "const": "beacon_response" },
+        "beacon_id": "string (match beacon)",
+        "node_id": "string (match node_register)",
+        "accepted": "boolean",
+        "confidence": "number (0-1, voting 權重用)",
+        "reason": "string (optional)"
+      }
+    },
+    "task_assign": {
+      "from": "router",
+      "to": "worker",
+      "purpose": "Router 確認派工",
+      "fields": {
+        "type": { "const": "task_assign" },
+        "task_id": "string (uuid)",
+        "beacon_id": "string (match beacon)",
+        "node_id": "string (assign to)",
+        "prompt": "string",
+        "n_votes": "number (default 3, CoT voting 次數)",
+        "temperature": "number (default 0.6)"
+      }
+    },
+    "task_result": {
+      "from": "worker",
+      "to": "router",
+      "purpose": "Worker 回傳結果（可多個 vote）",
+      "fields": {
+        "type": { "const": "task_result" },
+        "task_id": "string (match task_assign)",
+        "node_id": "string",
+        "votes": "array of {content, confidence, reasoning}",
+        "duration_ms": "number"
+      }
+    }
+  }
+}

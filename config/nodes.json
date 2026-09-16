@@ -1,0 +1,41 @@
+{
+  "max_beacon_targets": 3,
+  "nodes": [
+    {
+      "node_id": "main",
+      "url": "http://100.70.76.100:8087",
+      "model": "Qwythos-9B",
+      "gpu": "2x2080Ti",
+      "max_context": 8192,
+      "speed": "",
+      "capabilities": ["reasoning", "math", "analysis", "vision"]
+    },
+    {
+      "node_id": "rtx2080ti",
+      "url": "http://100.106.211.51:8085",
+      "model": "Qwopus-27B",
+      "gpu": "2080Ti 22GB",
+      "max_context": 16384,
+      "speed": "16.6 t/s",
+      "capabilities": ["reasoning", "math", "analysis", "vision", "code"]
+    },
+    {
+      "node_id": "rtx2060a",
+      "url": "http://100.115.169.51:8080",
+      "model": "Gemma4-12B",
+      "gpu": "2060 12GB",
+      "max_context": 8192,
+      "speed": "27.4 t/s",
+      "capabilities": ["reasoning", "math", "analysis"]
+    },
+    {
+      "node_id": "rtx3060",
+      "url": "http://100.97.2.13:8080",
+      "model": "Qwythos-1M-9B",
+      "gpu": "3060 12GB",
+      "max_context": 16384,
+      "speed": "~30 t/s",
+      "capabilities": ["reasoning", "math", "analysis", "vision"]
+    }
+  ]
+}

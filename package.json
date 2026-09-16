@@ -1,0 +1,14 @@
+{
+  "name": "swarm-orch",
+  "version": "0.1.0",
+  "description": "SwarmAI mesh — Node router + Python worker (5 JSON messages, Symphony-inspired)",
+  "main": "router/router.js",
+  "scripts": {
+    "router": "node router/router.js",
+    "worker": "python3 worker-node/worker.py"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
