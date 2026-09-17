@@ -1,0 +1,17 @@
+{
+  "node_id": "homesleep-01",
+  "completion_url": "",
+  "url": "",
+  "timezone": "Asia/Hong_Kong",
+  "sleep_start_hour": 0,
+  "sleep_end_hour": 7,
+  "share_mode": "auto",
+  "vram_total_gb": 22,
+  "model": "qwythos-1m",
+  "gpu": "2080Ti 22GB",
+  "max_context": 16384,
+  "speed": "",
+  "capabilities": ["reasoning", "math", "analysis", "code"],
+  "heartbeat_interval_s": 30,
+  "mock": true
+}
