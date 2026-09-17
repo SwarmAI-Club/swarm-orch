@@ -2,10 +2,13 @@
 const { spawn } = require("child_process");
 const path = require("path");
 const http = require("http");
+const fs = require("fs");
+const os = require("os");
 
 const PORT = 5911;
 const BASE = `http://127.0.0.1:${PORT}`;
 const ROUTER = path.join(__dirname, "router.js");
+const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "swarm-ledgertest-"));
 
 function req(method, url, body) {
   return new Promise((resolve, reject) => {
@@ -31,7 +34,7 @@ async function waitReady(t = 15) {
 
 (async () => {
   const child = spawn(process.execPath, [ROUTER], {
-    env: { ...process.env, SWARM_ROUTER_PORT: String(PORT), SWARM_CREDIT_RATE_PM: "10" },
+    env: { ...process.env, SWARM_ROUTER_PORT: String(PORT), SWARM_CREDIT_RATE_PM: "10", SWARM_DATA_DIR: DATA_DIR },
     stdio: "ignore",
   });
   try {
@@ -57,5 +60,6 @@ async function waitReady(t = 15) {
     console.log("LEDGER ALL PASS  balance=" + bal + " winner=" + v.winner);
   } finally {
     child.kill("SIGTERM");
+    try { fs.rmSync(DATA_DIR, { recursive: true, force: true }); } catch (e) {}
   }
 })().catch((e) => { console.error("LEDGER FAIL:", e.message); process.exit(1); });

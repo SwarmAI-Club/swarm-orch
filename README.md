@@ -46,8 +46,8 @@ Remote tasks run inside a container that can only reach the router/completion en
 
 ## Benchmarks
 
-Live run (2026-09-17, 3× Qwythos 9B nodes — main :8087, rtx2080ti :8087, rtx3060 :8080):
-BBH-lite 6-question reasoning, **direct 50% (3/6) → swarm weighted-voting 67% (4/6)** — one question the single model got wrong was corrected by the swarm vote.
+Live run (2026-09-17, **5× Qwythos 9B nodes** — main :8087, rtx2080ti :8087, rtx3060 :8080, rtx2060a/b :8087):
+BBH-lite 6-question reasoning, **direct 50% (3/6) → swarm weighted-voting 100% (6/6)** — every question the single model got wrong was corrected by the swarm vote.
 `benchmarks/results/*.json`. (Full BBH/AMC sets: `fetch_bbh.py` / `fetch_amc.py`.)
 
 ## Quick start

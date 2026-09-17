@@ -9,7 +9,7 @@ const PORT = process.env.SWARM_ROUTER_PORT || 4900;
 const CREDIT_RATE_PM = Number(process.env.SWARM_CREDIT_RATE_PM || 10); // credit per GPU-min
 
 // ---- Time-Bank ledger (SQLite) ----
-const DATA_DIR = path.join(__dirname, "..", "data");
+const DATA_DIR = process.env.SWARM_DATA_DIR || path.join(__dirname, "..", "data");
 fs.mkdirSync(DATA_DIR, { recursive: true });
 const db = new DatabaseSync(path.join(DATA_DIR, "ledger.db"));
 db.exec(`CREATE TABLE IF NOT EXISTS credits(
