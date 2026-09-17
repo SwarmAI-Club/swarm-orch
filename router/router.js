@@ -1,9 +1,51 @@
 const path = require("path");
+const fs = require("fs");
 const express = require("express");
 const crypto = require("crypto");
+const { DatabaseSync } = require("node:sqlite");
 
 const CONFIG = process.env.SWARM_CONFIG || path.join(__dirname, "..", "config", "nodes.json");
 const PORT = process.env.SWARM_ROUTER_PORT || 4900;
+const CREDIT_RATE_PM = Number(process.env.SWARM_CREDIT_RATE_PM || 10); // credit per GPU-min
+
+// ---- Time-Bank ledger (SQLite) ----
+const DATA_DIR = path.join(__dirname, "..", "data");
+fs.mkdirSync(DATA_DIR, { recursive: true });
+const db = new DatabaseSync(path.join(DATA_DIR, "ledger.db"));
+db.exec(`CREATE TABLE IF NOT EXISTS credits(
+  node_id TEXT PRIMARY KEY,
+  balance INTEGER NOT NULL DEFAULT 0
+)`);
+db.exec(`CREATE TABLE IF NOT EXISTS ledger(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts INTEGER NOT NULL,
+  type TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  task_id TEXT,
+  gpu_min REAL,
+  credit INTEGER NOT NULL,
+  note TEXT
+)`);
+
+function creditBalance(nodeId) {
+  const row = db.prepare("SELECT balance FROM credits WHERE node_id=?").get(nodeId);
+  return row ? row.balance : 0;
+}
+function ledgerMint(nodeId, gpuMin, taskId, note = "") {
+  const credit = Math.max(1, Math.round((gpuMin || 0) * CREDIT_RATE_PM));
+  db.prepare("INSERT INTO credits(node_id,balance) VALUES(?,?) ON CONFLICT(node_id) DO UPDATE SET balance=balance+?").run(nodeId, credit, credit);
+  db.prepare("INSERT INTO ledger(ts,type,node_id,task_id,gpu_min,credit,note) VALUES(?,?,?,?,?,?,?)")
+    .run(Date.now(), "mint", nodeId, taskId || null, gpuMin || 0, credit, note);
+  return credit;
+}
+function ledgerBurn(nodeId, credit, taskId, note = "") {
+  const bal = creditBalance(nodeId);
+  const actual = Math.min(credit, bal);
+  db.prepare("UPDATE credits SET balance=balance-? WHERE node_id=?").run(actual, nodeId);
+  db.prepare("INSERT INTO ledger(ts,type,node_id,task_id,gpu_min,credit,note) VALUES(?,?,?,?,?,?,?)")
+    .run(Date.now(), "burn", nodeId, taskId || null, 0, actual, note);
+  return actual;
+}
 const nodes = require(CONFIG);
 
 const app = express();
@@ -75,8 +117,42 @@ app.post("/vote", async (req, res) => {
     const ans = String(v.content).trim();
     tally[ans] = (tally[ans] || 0) + (v.confidence || 0.5);
   }
+  // Time-Bank: 每個 provider 按 duration_ms 折算 credit 入帳
+  const mints = [];
+  for (const r of results) {
+    const gpuMin = (r.duration_ms || 0) / 60000;
+    if (r.node_id && gpuMin > 0) {
+      const c = ledgerMint(r.node_id, gpuMin, r.task_id || req.body.task_id || null, "vote");
+      mints.push({ node_id: r.node_id, credit: c, gpu_min: Number(gpuMin.toFixed(3)) });
+    }
+  }
   const winner = Object.entries(tally).sort((a, b) => b[1] - a[1])[0];
-  res.json({ winner: winner?.[0], confidence: winner?.[1], tally });
+  res.json({ winner: winner?.[0], confidence: winner?.[1], tally, mints });
+});
+
+// ---- Time-Bank ledger endpoints ----
+app.post("/ledger/mint", (req, res) => {
+  const { node_id, task_id, gpu_min } = req.body || {};
+  if (!node_id) return res.status(400).json({ ok: false, error: "node_id required" });
+  const credit = ledgerMint(node_id, Number(gpu_min || 0), task_id, "manual");
+  res.json({ ok: true, node_id, credit, balance: creditBalance(node_id) });
+});
+
+app.post("/ledger/burn", (req, res) => {
+  const { node_id, credit, task_id } = req.body || {};
+  if (!node_id || !credit) return res.status(400).json({ ok: false, error: "node_id & credit required" });
+  const actual = ledgerBurn(node_id, Number(credit), task_id, "manual");
+  res.json({ ok: true, node_id, burned: actual, balance: creditBalance(node_id) });
+});
+
+app.get("/credits/:node", (req, res) => {
+  res.json({ node_id: req.params.node, balance: creditBalance(req.params.node) });
+});
+
+app.get("/ledger/latest", (req, res) => {
+  const limit = Math.min(50, Number(req.query.limit || 20));
+  const rows = db.prepare("SELECT * FROM ledger ORDER BY id DESC LIMIT ?").all(limit);
+  res.json(rows);
 });
 
 app.get("/nodes", (_, res) => res.json([...registry.values()]));
