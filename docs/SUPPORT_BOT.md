@@ -24,6 +24,10 @@ Long-poll Telegram bot，無需 framework（stdlib + requests）。FAQ 自動回
 - log：`/mnt/d/node-log/swarm-support-bot.log`
 - 用 router 真實狀態：`swarm-monitor.env` 入面 `SWARM_ROUTER_TOKEN`（monitor 有）
 
+## Staff 白名單（/reply 人工接管）
+- 預設得 `SWARM_ADMIN_CHAT` 可以用 `/reply <chat> <text>` 接管客戶。
+- 想加多幾個客服：`/mnt/d/docker_nginx/swarm-support-bot.env` 加 `SWARM_CS_STAFF=<chat1>,<chat2>`。
+
 ## 專屬 bot token（建議）
 而家 fallback 用 `.docker-watchdog.env` 嘅 `TELEGRAM_BOT_TOKEN`（opencode bot）。**建議用 BotFather 開一個專屬 bot**：
 1. Telegram 開 @BotFather → /newbot → 抄個 token
