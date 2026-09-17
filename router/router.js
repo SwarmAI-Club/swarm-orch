@@ -6,9 +6,12 @@ const { DatabaseSync } = require("node:sqlite");
 
 const CONFIG = process.env.SWARM_CONFIG || path.join(__dirname, "..", "config", "nodes.json");
 const PORT = process.env.SWARM_ROUTER_PORT || 4900;
-const CREDIT_RATE_PM = Number(process.env.SWARM_CREDIT_RATE_PM || 10); // credit per GPU-min
+const CREDIT_RATE_PM = Number(process.env.SWARM_CREDIT_RATE_PM || 10); // SWAI per GPU-min (task votes)
+const UPTIME_RATE_PM = Number(process.env.SWARM_UPTIME_RATE_PM || 2);  // SWAI per idle min (Proof-of-Uptime)
+const NET_TOKEN = process.env.SWARM_API_TOKEN || "dev-insecure-token"; // REQUIRED, all endpoints check it
 
-// ---- Time-Bank ledger (SQLite) ----
+
+// ---- Time-Bank ledger (SWAI, SQLite) ----
 const DATA_DIR = process.env.SWARM_DATA_DIR || path.join(__dirname, "..", "data");
 fs.mkdirSync(DATA_DIR, { recursive: true });
 const db = new DatabaseSync(path.join(DATA_DIR, "ledger.db"));
@@ -26,7 +29,6 @@ db.exec(`CREATE TABLE IF NOT EXISTS ledger(
   credit INTEGER NOT NULL,
   note TEXT
 )`);
-
 function creditBalance(nodeId) {
   const row = db.prepare("SELECT balance FROM credits WHERE node_id=?").get(nodeId);
   return row ? row.balance : 0;
@@ -50,6 +52,12 @@ const nodes = require(CONFIG);
 
 const app = express();
 app.use(express.json());
+// ---- Auth: all endpoints require X-Swarm-Token ----
+app.use((req, res, next) => {
+  const t = req.get("x-swarm-token");
+  if (t !== NET_TOKEN) return res.status(401).json({ ok: false, error: "invalid x-swarm-token" });
+  next();
+});
 
 const registry = new Map();       // node_id -> capabilities/model/gpu/url
 const pendingBeacons = new Map(); // beacon_id -> {required, responses, ts}
@@ -72,16 +80,24 @@ function matchCapabilities(required, candidates) {
 
 app.post("/register", (req, res) => {
   const { node_id, capabilities, model, gpu, max_context, speed, url } = req.body;
-  registry.set(node_id, { node_id, capabilities, model, gpu, max_context, speed, url });
-  res.json({ ok: true, nodes: registry.size });
+  const n = registry.get(node_id) || { uptime_s: 0, last_status: null };
+  Object.assign(n, { node_id, capabilities, model, gpu, max_context, speed, url });
+  registry.set(node_id, n);
+  res.json({ ok: true, nodes: registry.size, uptime_rate_pm: UPTIME_RATE_PM, credit_rate_pm: CREDIT_RATE_PM });
 });
 
-// protocol v0.2: node_status heartbeat
+// protocol v0.2: node_status heartbeat (+ Proof-of-Uptime accumulation)
 app.post("/status", (req, res) => {
   const { node_id, status, vram_used_gb, model_loaded, load, sleeping, ts } = req.body || {};
   const n = registry.get(node_id);
   if (n) {
-    n.last_status = { status, vram_used_gb, model_loaded, load, sleeping, ts: ts || Date.now() };
+    const nowMs = Date.now();
+    const tsS = (ts && ts < 1e12) ? Number(ts) : (nowMs / 1000);
+    const last = n.last_status;
+    if (last && last.__state === "IDLE_SHARING") {
+      n.uptime_s += (nowMs - last.__tsMs) / 1000;
+    }
+    n.last_status = { status, vram_used_gb, model_loaded, load, sleeping, ts: tsS, __state: status, __tsMs: nowMs };
   }
   res.json({ ok: !!n, node_id });
 });
@@ -169,11 +185,21 @@ app.get("/ledger/latest", (req, res) => {
 
 app.get("/nodes", (_, res) => res.json([...registry.values()]));
 
-// periodic prune: 3 0-min TTL for beacons/results (memory hygiene)
+// periodic: prune stale + Proof-of-Uptime settlement sweep (10 min)
 setInterval(() => {
   const cutoff = Date.now() - 30 * 60 * 1000;
   for (const [k, v] of pendingBeacons) if (v.ts && v.ts < cutoff) pendingBeacons.delete(k);
   for (const [k, v] of resultsStore) if (v.ts && v.ts < cutoff) resultsStore.delete(k);
-}, 5 * 60 * 1000).unref();
+  // PoU: IDLE_SHARING 累積 uptime >= 1min → mint SWAI
+  for (const n of registry.values()) {
+    if (n.uptime_s >= 60) {
+      const mins = n.uptime_s / 60;
+      const credit = Math.max(1, Math.round(mins * UPTIME_RATE_PM));
+      ledgerMint(n.node_id, mins, null, "uptime");
+      n.uptime_s -= mins * 60;
+      console.log(`[uptime] ${n.node_id} +${credit} SWAI (${mins.toFixed(1)}min idle)`);
+    }
+  }
+}, 10 * 60 * 1000).unref();
 
 app.listen(PORT, "0.0.0.0", () => console.log(`[swarm-router] listening :${PORT} (${registry.size} registered)`));

@@ -44,6 +44,12 @@ def llm_complete(completion_url, prompt, n_predict=512, temperature=0.6):
     return r.json().get("content", "").strip()
 
 
+def _headers(args):
+    h = {"content-type": "application/json"}
+    if args.token:
+        h["x-swarm-token"] = args.token
+    return h
+
 class Worker:
     def __init__(self, args):
         self.args = args
@@ -61,8 +67,13 @@ class Worker:
     def register(self, retries=3, delay=2):
         for i in range(retries):
             try:
-                r = requests.post(self.args.router.rstrip("/") + "/register", json=self.info, timeout=10)
-                print(f"[worker] registered {self.args.node_id} -> {self.args.router} ({r.json().get('nodes')} nodes)")
+                r = requests.post(self.args.router.rstrip("/") + "/register", json=self.info,
+                                  headers=_headers(self.args), timeout=10)
+                j = r.json()
+                if not j.get("ok"):
+                    print(f"[worker] register rejected: {j.get('error')}", file=sys.stderr)
+                    return False
+                print(f"[worker] registered {self.args.node_id} -> {self.args.router} ({j.get('nodes')} nodes)")
                 return True
             except Exception as e:
                 print(f"[worker] register attempt {i+1}/{retries} FAIL: {e}", file=sys.stderr)
@@ -92,7 +103,7 @@ class Worker:
             "duration_ms": int((time.time() - t0) * 1000),
         }
         try:
-            requests.post(self.args.router.rstrip("/") + "/result", json=payload, timeout=20)
+            requests.post(self.args.router.rstrip("/") + "/result", json=payload, headers=_headers(self.args), timeout=20)
         except Exception as e:
             print(f"[worker] result post FAIL: {e}", file=sys.stderr)
         return {"ok": True, "votes": len(votes), "node_id": self.args.node_id}
@@ -104,7 +115,7 @@ class Worker:
                 "status": "IDLE_SHARING" if sleeping else "USER_OCCUPIED",
                 "vram_used_gb": self.args.vram, "model_loaded": self.args.model,
                 "sleeping": sleeping, "ts": int(time.time()),
-            }, timeout=10)
+            }, headers=_headers(self.args), timeout=10)
         except Exception as e:
             print(f"[worker] heartbeat FAIL: {e}", file=sys.stderr)
 
@@ -150,6 +161,7 @@ def make_handler(worker):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--router", default=os.environ.get("SWARM_ROUTER", "http://100.70.76.100:4900"))
+    ap.add_argument("--token", default=os.environ.get("SWARM_API_TOKEN"), help="X-Swarm-Token（router 認證；必填）")
     ap.add_argument("--node-id", default=os.environ.get("HOSTNAME", "node-" + uuid.uuid4().hex[:6]))
     ap.add_argument("--completion", default=os.environ.get("SWARM_COMPLETION"), help="llama-server /completion URL")
     ap.add_argument("--capabilities", nargs="*", default=["reasoning", "math", "analysis"])
@@ -165,6 +177,9 @@ def main():
     args = ap.parse_args()
     if not args.completion:
         print("--completion 必填（llama-server /completion URL）或 用 SWARM_COMPLETION env", file=sys.stderr)
+        sys.exit(1)
+    if not args.token:
+        print("--token / SWARM_API_TOKEN 必填（router 認證）", file=sys.stderr)
         sys.exit(1)
 
     worker = Worker(args)

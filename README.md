@@ -57,24 +57,33 @@ BBH-lite 6-question reasoning, **direct 50% (3/6) → swarm weighted-voting 100%
 ```bash
 # Router (main node)
 npm install
-SWARM_ROUTER_PORT=4900 node router/router.js      # :4900, ledger in data/ledger.db
+export SWARM_API_TOKEN=<network-token>        # REQUIRED by all clients
+SWARM_ROUTER_PORT=4900 node router/router.js   # :4900, SWAI ledger data/ledger.db (auth on)
 
 # Worker (each GPU node)
 python3 worker-node/worker.py \
-  --router http://100.70.76.100:4900 \
+  --router http://100.70.76.100:4900 --token "$SWARM_API_TOKEN" \
   --node-id rtx2080ti \
   --completion http://100.106.211.51:8087/completion \
   --capabilities reasoning math analysis code \
   --heartbeat 30
 
 # Client agent (sleep-window sharing) — works without a GPU (--mock)
-python3 agent/swarm_agent.py --config agent/agent.json --router http://100.70.76.100:4900 --mock --heartbeat 30
+SWARM_API_TOKEN="$SWARM_API_TOKEN" python3 agent/swarm_agent.py --config agent/agent.json --router http://100.70.76.100:4900 --mock --heartbeat 30
 
 # Sandbox worker (Docker)
 SWARM_COMPLETION=http://100.106.211.51:8087/completion bash sandbox/run-worker.sh rtx2080ti "reasoning math code"
 ```
 
-## Tests
+## Auth & SWAI (contribution)
+
+- **Auth**: every router endpoint requires header `X-Swarm-Token: <token>`. Start router with `SWARM_API_TOKEN=<network-token>`; clients (worker/agent/monitor) use the same token (`--token` / `SWARM_API_TOKEN`).
+- **SWAI (contribution)**:
+  - Task vote: `max(1, round(gpu_min × RATE))` — `RATE = SWARM_CREDIT_RATE_PM` (default 10 SWAI/min), minted on `/vote` per provider.
+  - Proof-of-Uptime: `IDLE_SHARING` heartbeats accumulate; settled every 10 min via `SWARM_UPTIME_RATE_PM` (default 2 SWAI/min idle).
+  - Query: `GET /credits/<node_id>`.
+
+ ## Tests
 
 ```bash
 python3 agent/smoke_test.py      # agent register + heartbeat

@@ -11,6 +11,13 @@ import json, os, re, sys, time, uuid
 import requests
 
 ROUTER = os.environ.get("SWARM_ROUTER", "http://100.70.76.100:4900")
+TOKEN = os.environ.get("SWARM_API_TOKEN") or os.environ.get("SWARM_ROUTER_TOKEN","")
+
+
+def hdrs():
+    h = {}
+    if TOKEN: h["x-swarm-token"] = TOKEN
+    return h
 MAIN_COMPLETION = os.environ.get("SWARM_MAIN_COMPLETION", "http://100.70.76.100:8087/completion")
 
 QUESTIONS = [
@@ -50,12 +57,12 @@ def direct_answer(completion_url, prompt):
 def swarm_answer(q):
     task_id = uuid.uuid4().hex[:12]
     prompt = make_prompt(q)
-    beacon = requests.post(f"{ROUTER}/beacon", json={
+    beacon = requests.post(f"{ROUTER}/beacon", headers=hdrs(), json={
         "task": q["q"], "required_capabilities": ["reasoning", "math"],
         "priority": 1,
     }, timeout=15).json()
     accepted = [r for r in beacon.get("responses", []) if r.get("accepted")]
-    nodes = {n["node_id"]: n["url"] for n in requests.get(f"{ROUTER}/nodes", timeout=10).json()}
+    nodes = {n["node_id"]: n["url"] for n in requests.get(f"{ROUTER}/nodes", headers=hdrs(), timeout=10).json()}
     votes_done = 0
     for r in accepted:
         url = nodes.get(r["node_id"])
@@ -68,7 +75,7 @@ def swarm_answer(q):
         if assign.status_code == 200:
             votes_done += 1
     time.sleep(2)
-    vote = requests.post(f"{ROUTER}/vote", json={"task_id": task_id, "beacon_id": beacon["beacon_id"]}, timeout=15).json()
+    vote = requests.post(f"{ROUTER}/vote", headers=hdrs(), json={"task_id": task_id, "beacon_id": beacon["beacon_id"]}, timeout=15).json()
     return vote.get("winner") and letter(vote.get("winner")), vote
 
 

@@ -60,6 +60,14 @@ def node_status_payload(cfg, sleeping):
     }
 
 
+def _headers(cfg):
+    token = cfg.get("token") or os.environ.get("SWARM_API_TOKEN", "")
+    h = {"content-type": "application/json"}
+    if token:
+        h["x-swarm-token"] = token
+    return h
+
+
 def register(cfg, router):
     data = {
         "type": "node_register",
@@ -71,13 +79,14 @@ def register(cfg, router):
         "speed": cfg.get("speed", ""),
         "url": cfg.get("url", ""),
     }
-    r = requests.post(router.rstrip("/") + "/register", json=data, timeout=10)
+    r = requests.post(router.rstrip("/") + "/register", json=data, headers=_headers(cfg), timeout=10)
     r.raise_for_status()
     return r.json()
 
 
 def heartbeat(cfg, router, sleeping):
-    r = requests.post(router.rstrip("/") + "/status", json=node_status_payload(cfg, sleeping), timeout=10)
+    r = requests.post(router.rstrip("/") + "/status", json=node_status_payload(cfg, sleeping),
+                      headers=_headers(cfg), timeout=10)
     r.raise_for_status()
     return r.json()
 

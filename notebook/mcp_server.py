@@ -13,19 +13,26 @@ import json, os, sys
 import requests
 
 ROUTER = os.environ.get("SWARM_ROUTER", "http://100.70.76.100:4900")
+TOKEN = os.environ.get("SWARM_API_TOKEN") or os.environ.get("SWARM_ROUTER_TOKEN", "")
+
+
+def hdrs():
+    h = {}
+    if TOKEN: h["x-swarm-token"] = TOKEN
+    return h
 
 TOOLS = {
     "nodes.list": {
         "description": "列出已註冊嘅 swarm 節點 + 最後 heartbeat",
-        "call": lambda args: requests.get(f"{ROUTER}/nodes", timeout=10).json(),
+        "call": lambda args: requests.get(f"{ROUTER}/nodes", headers=hdrs(), timeout=10).json(),
     },
     "credits.get": {
         "description": "查某 node 嘅 Time-Bank credit balance",
-        "call": lambda args: requests.get(f"{ROUTER}/credits/{args['node_id']}", timeout=10).json(),
+        "call": lambda args: requests.get(f"{ROUTER}/credits/{args['node_id']}", headers=hdrs(), timeout=10).json(),
     },
     "task.beacon": {
         "description": "向 swarm 廣播任務，等 worker 應戰（唔會洩漏私密：先喺前端過 privacy filter）",
-        "call": lambda args: requests.post(f"{ROUTER}/beacon", json={
+        "call": lambda args: requests.post(f"{ROUTER}/beacon", headers=hdrs(), json={
             "task": args["task"], "required_capabilities": args.get("capabilities", ["reasoning"]),
         }, timeout=15).json(),
     },
