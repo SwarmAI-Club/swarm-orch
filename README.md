@@ -57,7 +57,10 @@ BBH-lite 6-question reasoning, **direct 50% (3/6) → swarm weighted-voting 100%
 External clients/web users bypass Tailscale entirely — everything goes through the public gateway:
 
 - **Portal**: https://swarmai.club/portal/ → signup/login → get your own API token (SWAI balance shown)
-- **Rare-port entry (direct origin, no Cloudflare)**: `http://swarmai.club:6769/portal/` + `/swarm/*` — requires router NAT forward TCP 6769 → origin LAN IP (Cloudflare does not proxy non-standard ports; 6769 is served by nginx directly).
+- **Primary = 443 + path proxy (no NAT needed, Cloudflare-fronted)**:
+  - Portal: `https://swarmai.club/portal/`
+  - Router API: `https://swarmai.club/swarm/*` (e.g. `/swarm/nodes`, `/swarm/register`) with `X-Swarm-Token`
+- Optional rare port (direct origin only): `http://swarmai.club:6769/portal/` + `/swarm/*` — requires router NAT forward TCP 6769 → origin LAN IP (Cloudflare does not proxy non-standard ports).
 - **Router API over public HTTPS**: `https://swarmai.club/swarm/...` (e.g. `/swarm/nodes`, `/swarm/register`) with `X-Swarm-Token`
 - Clients point worker/agent at `--router https://swarmai.club/swarm/` — no VPN, unlimited users (Cloudflare in front; your identity = email).
 
