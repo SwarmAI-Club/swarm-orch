@@ -32,4 +32,4 @@ Long-poll Telegram bot，無需 framework（stdlib + requests）。FAQ 自動回
    ```
 3. 重啟 bot（kill 舊 process + re-launch）
 
-> ⚠️ 同一個 bot token 唔可以同時俾多個 long-poll；如果 opencode-telegram 都有 poll 緊同一 token 就會 409。
+> ✅ 2026-09-17: 已改用 **專屬 token**（@SwarmAI_Club_bot）；code **只讀 `SWARM_SUPPORT_BOT_TOKEN`**（唔再 fallback 去 opencode token），並有 **409 startup guard** —— 唔會再同 opencode-telegram 搶。
