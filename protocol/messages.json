@@ -1,6 +1,6 @@
 {
-  "$schema": "SwarmAI Mesh Protocol v0.1",
-  "description": "5 種 JSON message，Node router <-> Python worker 互通。Transport Phase 1 = HTTP over Tailscale (100.x)，協議層抽象可換 libp2p/MQ。",
+  "$schema": "SwarmAI Mesh Protocol v0.2",
+  "description": "7 種 JSON message，Node router <-> Python worker 互通。Transport Phase 1 = HTTP over Tailscale (100.x)，協議層抽象可換 libp2p/MQ。v0.2 加 node_status (heartbeat) + credit 事件。",
   "messages": {
     "node_register": {
       "from": "worker",
@@ -66,6 +66,44 @@
         "node_id": "string",
         "votes": "array of {content, confidence, reasoning}",
         "duration_ms": "number"
+      }
+    },
+    "node_status": {
+      "from": "worker",
+      "to": "router",
+      "purpose": "Heartbeat — worker 定期佈告自己狀態（睡眠共享 / 用戶使用中），供 Trust/credit 計分",
+      "fields": {
+        "type": { "const": "node_status" },
+        "node_id": "string (match node_register)",
+        "status": "enum [IDLE_SHARING, USER_OCCUPIED]",
+        "vram_used_gb": "number (optional)",
+        "model_loaded": "string (optional)",
+        "load": "number (0-1, optional)",
+        "sleeping": "boolean (optional, 是否響睡眠共享窗口內)",
+        "ts": "number (unix)"
+      }
+    },
+    "credit_mint": {
+      "from": "router",
+      "to": "worker",
+      "purpose": "任務完成後 router 通知 worker 入帳（Time-Bank）",
+      "fields": {
+        "type": { "const": "credit_mint" },
+        "node_id": "string",
+        "task_id": "string",
+        "gpu_min": "number",
+        "credit": "number"
+      }
+    },
+    "credit_burn": {
+      "from": "worker",
+      "to": "router",
+      "purpose": "Requester 消耗 credit 提交任務",
+      "fields": {
+        "type": { "const": "credit_burn" },
+        "node_id": "string",
+        "task_id": "string",
+        "credit": "number"
       }
     }
   }

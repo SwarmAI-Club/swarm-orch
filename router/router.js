@@ -1,7 +1,8 @@
+const path = require("path");
 const express = require("express");
 const crypto = require("crypto");
 
-const CONFIG = process.env.SWARM_CONFIG || "../config/nodes.json";
+const CONFIG = process.env.SWARM_CONFIG || path.join(__dirname, "..", "config", "nodes.json");
 const PORT = process.env.SWARM_ROUTER_PORT || 4900;
 const nodes = require(CONFIG);
 
@@ -30,6 +31,16 @@ app.post("/register", (req, res) => {
   const { node_id, capabilities, model, gpu, max_context, speed, url } = req.body;
   registry.set(node_id, { node_id, capabilities, model, gpu, max_context, speed, url });
   res.json({ ok: true, nodes: registry.size });
+});
+
+// protocol v0.2: node_status heartbeat
+app.post("/status", (req, res) => {
+  const { node_id, status, vram_used_gb, model_loaded, load, sleeping, ts } = req.body || {};
+  const n = registry.get(node_id);
+  if (n) {
+    n.last_status = { status, vram_used_gb, model_loaded, load, sleeping, ts: ts || Date.now() };
+  }
+  res.json({ ok: !!n, node_id });
 });
 
 app.post("/beacon", async (req, res) => {
