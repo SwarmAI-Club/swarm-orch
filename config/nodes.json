@@ -8,16 +8,27 @@
       "gpu": "2x2080Ti",
       "max_context": 8192,
       "speed": "",
-      "capabilities": ["reasoning", "math", "analysis", "vision"]
+      "capabilities": [
+        "reasoning",
+        "math",
+        "analysis",
+        "vision"
+      ]
     },
     {
       "node_id": "rtx2080ti",
-      "url": "http://100.106.211.51:8085",
+      "url": "http://100.106.211.51:8087",
       "model": "Qwopus-27B",
       "gpu": "2080Ti 22GB",
       "max_context": 16384,
       "speed": "16.6 t/s",
-      "capabilities": ["reasoning", "math", "analysis", "vision", "code"]
+      "capabilities": [
+        "reasoning",
+        "math",
+        "analysis",
+        "vision",
+        "code"
+      ]
     },
     {
       "node_id": "rtx2060a",
@@ -26,7 +37,11 @@
       "gpu": "2060 12GB",
       "max_context": 8192,
       "speed": "27.4 t/s",
-      "capabilities": ["reasoning", "math", "analysis"]
+      "capabilities": [
+        "reasoning",
+        "math",
+        "analysis"
+      ]
     },
     {
       "node_id": "rtx3060",
@@ -35,7 +50,12 @@
       "gpu": "3060 12GB",
       "max_context": 16384,
       "speed": "~30 t/s",
-      "capabilities": ["reasoning", "math", "analysis", "vision"]
+      "capabilities": [
+        "reasoning",
+        "math",
+        "analysis",
+        "vision"
+      ]
     }
   ]
 }
