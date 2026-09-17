@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SwarmAI — Client Portal</title>
 <style>
+  :root{--bg:#0a0e17;--card:#111827;--acc:#22d3ee;--acc2:#a855f7;--ok:#22c55e;--txt:#e5e7eb;--muted:#94a3b8}
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,monospace;background:var(--bg);color:var(--txt);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
 .wrap{max-width:760px;width:100%;background:var(--card);border:1px solid #1f2937;border-radius:16px;padding:26px}
@@ -28,8 +29,6 @@ table{width:100%;border-collapse:collapse;font-size:.76rem}
 th,td{text-align:left;padding:6px 7px;border-bottom:1px solid #1f2937}
 th{color:var(--acc)}
 </style>
-<link rel="stylesheet" id="swarmai-theme" href="/themes/theme-dark.css?v=20260918c">
-<script>(function(){try{var T=["theme-dark","theme-minimal","theme-terminal","theme-glass"],K="swarmai_theme",m=(location.search.match(/[?&]theme=([a-z-]+)/)||[])[1],v=m||localStorage.getItem(K);if(!v||T.indexOf(v)<0){v=T[Math.floor(Math.random()*T.length)];}localStorage.setItem(K,v);document.getElementById("swarmai-theme").href="/themes/"+v+".css?v=20260918c";}catch(e){}})();</script>
 </head>
 <body>
 <div class="wrap">
@@ -171,6 +170,6 @@ async function revokeKey(tok){
 
 function logout(){ location.reload(); }
 </script>
-<script src="/themes/theme-picker.js"></script>
+
 </body>
 </html>
