@@ -7,7 +7,7 @@ Cross-timezone, asynchronous compute sharing for home GPUs. MIT · [swarmai.club
 
 ## North Star
 
-Home users lend their GPU during their local night / idle hours (Proof-of-Uptime, earning **Time-Bank credits**).
+Home users lend their GPU during their local night / idle hours (Proof-of-Uptime, earning **SWAI token units** (off-chain settlement)).
 When they need heavy AI work during their day, they call on GPUs of users currently sleeping in other time zones — a "reverse sundial" of idle compute. Open, auditable, decentralized — no big-tech data center required.
 
 ## Architecture
