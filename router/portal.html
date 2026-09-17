@@ -63,6 +63,13 @@ th{color:var(--acc)}
       <div style="margin-top:8px"><div class="muted">用呢條 token 落 worker：<code style="background:#0b1220">--token "&lt;上面&gt;" --node-id &lt;node_id&gt;</code></div></div>
     </div>
     <div class="card"><div class="muted" style="margin-bottom:8px">最近分錄（mint/burn）</div><pre id="led"><span class="muted">loading…</span></pre></div>
+    <div class="card"><div class="muted" style="margin-bottom:8px">🔑 分享 Keys（每把 Key 都會扣同一個 SWAI 池；可獨立 revoke）</div>
+      <div style="display:flex;gap:8px;margin-bottom:8px">
+        <input id="key-label" placeholder="例如 team-mate / office" style="flex:1">
+        <button style="width:auto;padding:9px 16px;margin:0" onclick="createKey()">加 Key</button>
+      </div>
+      <table><thead><tr><th>label</th><th>token</th><th></th></tr></thead><tbody id="keys"></tbody></table>
+    </div>
     <button onclick="logout()">登出</button>
   </div>
 </div>
@@ -109,8 +116,32 @@ async function loadMe(){
     if(!d.ok){E('led').textContent='token 已失效，請重新登入'; return;}
     E('bal').textContent = d.balance;
     E('led').textContent = JSON.stringify(d.journal, null, 1);
+    loadKeys();
   }catch(e){ E('led').textContent='load fail: '+e; }
 }
+
+async function loadKeys(){
+  try{
+    const r = await fetch('/portal/keys', {headers:{'x-swarm-token':window.__tok}});
+    const d = await r.json();
+    if(!d.ok){ E('keys').innerHTML=''; return; }
+    E('keys').innerHTML = (d.keys||[]).map(k=>`<tr><td>${k.label||'—'}</td><td><code>${k.token}</code></td><td><button style="width:auto;padding:5px 12px;margin:0" onclick="revokeKey('${k.token}')">revoke</button></td></tr>`).join('');
+  }catch(e){}
+}
+async function createKey(){
+  const label = E('key-label').value || 'key';
+  const r = await fetch('/portal/keys/create', {method:'POST', headers:{'content-type':'application/json','x-swarm-token':window.__tok}, body: JSON.stringify({label})});
+  const d = await r.json();
+  if(d.ok){ alert('新 Key（只顯示一次）：\n'+d.token); E('key-label').value=''; loadKeys(); } else alert('失敗: '+(d.error||''));
+}
+async function revokeKey(tok){
+  if(!confirm('確認 revoke 呢把 Key？')) return;
+  const r = await fetch('/portal/keys/revoke', {method:'POST', headers:{'content-type':'application/json','x-swarm-token':window.__tok}, body: JSON.stringify({token:tok})});
+  const d = await r.json();
+  alert(d.ok ? '已 revoke ✓' : '失敗: '+(d.error||''));
+  loadKeys();
+}
+
 function logout(){ location.reload(); }
 </script>
 </body>
