@@ -240,6 +240,8 @@ setInterval(() => {
 app.post("/task", async (req, res) => {
   const { beacon_id, prompt, required_capabilities = ["reasoning"], n_votes = 3, temperature = 0.6 } = req.body || {};
   if (!prompt) return res.status(400).json({ ok: false, error: "prompt required" });
+  const MAX_PROMPT = Number(process.env.SWARM_MAX_PROMPT || 8000);
+  if (prompt.length > MAX_PROMPT) return res.status(413).json({ ok: false, error: "prompt 太長" });
   const bid = beacon_id || crypto.randomUUID();
   const task_id = crypto.randomUUID();
   const matches = matchCapabilities(required_capabilities, [...registry.values()]);
@@ -256,8 +258,9 @@ app.post("/task", async (req, res) => {
     ledgerBurn(reqUser.node_id, TASK_FEE, task_id, "task");
   }
   for (const { node, score } of matches.slice(0, (req.body.max_targets || CONFIG.max_beacon_targets || 5))) {
+    const urlSafe = new RegExp("^https?://(127\.0\.0\.1|100\.|localhost)").test(node.url || "");
     try {
-      if (node.pull) {
+      if (node.pull || !urlSafe) {
         const q = inbox.get(node.node_id) || [];
         q.push({ ...payload, ts: Date.now() });
         inbox.set(node.node_id, q);
@@ -354,4 +357,5 @@ app.get("/portal", (_, res) => {
 });
 
 
-app.listen(PORT, "0.0.0.0", () => console.log(`[swarm-router] listening :${PORT} (${registry.size} registered)`));
+const BIND = (process.env.SWARM_BIND || "127.0.0.1,100.70.76.100").split(",").map(x => x.trim());
+for (const host of BIND) app.listen(PORT, host, () => console.log(`[swarm-router] listening on ${host}:${PORT}`));
