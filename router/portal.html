@@ -44,6 +44,18 @@ th{color:var(--acc)}
     <label>Email</label><input id="li-email" type="email" placeholder="you@example.com">
     <label>Password</label><input id="li-pass" type="password" placeholder="******">
     <button onclick="doLogin()">登入 → 攞 token</button>
+    <div style="text-align:center;margin-top:8px"><a href="#" onclick="toggleForgot();return false" style="color:var(--acc);font-size:.85rem">忘記密碼？</a></div>
+  </div>
+  <div id="p-forgot" class="hide">
+    <label>Email（收重置郵件）</label><input id="fg-email" type="email" placeholder="you@example.com">
+    <button onclick="doForgot()">發送重置連結</button>
+    <div class="muted" id="fg-status" style="margin-top:8px"></div>
+    <div style="text-align:center;margin-top:8px"><a href="#" onclick="backLogin();return false" style="color:var(--acc);font-size:.85rem">← 返去登入</a></div>
+  </div>
+  <div id="p-reset" class="hide">
+    <label>新密碼（最少 13 位：大階+細階+數字+符號）</label><input id="rs-pass" type="password">
+    <button onclick="doReset()">重置密碼</button>
+    <div class="muted" id="rs-status" style="margin-top:8px"></div>
   </div>
 
   <div id="p-signup" class="hide">
@@ -86,6 +98,20 @@ function E(id){return document.getElementById(id)}
 async function api(path, body, token){
   const r = await fetch(path, {method:'POST', headers:{'content-type':'application/json', ...(token?{'x-swarm-token':token}:{})}, body: JSON.stringify(body)});
   return r.json();
+}
+function toggleForgot(){ document.getElementById("p-login").classList.add("hide"); document.getElementById("p-forgot").classList.remove("hide"); }
+function backLogin(){ document.getElementById("p-forgot").classList.add("hide"); document.getElementById("p-login").classList.remove("hide"); }
+async function doForgot(){
+  const r = await fetch('/portal/forgot', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({email: E('fg-email').value})});
+  const d = await r.json();
+  E('fg-status').textContent = d.hint || '已處理';
+}
+// 如果 URL 帶 ?code= → 顯示重置 form
+(function(){ const m=(location.search.match(/[?&]code=([^&]+)/)||[])[1]; if(m){ window.__resetCode=m; document.getElementById("p-login").classList.add("hide"); document.getElementById("p-reset").classList.remove("hide"); } })();
+async function doReset(){
+  const r = await fetch('/portal/reset', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({code: window.__resetCode, password: E('rs-pass').value})});
+  const d = await r.json();
+  E('rs-status').textContent = d.ok ? '✅ '+d.message : '❌ '+d.error;
 }
 async function doLogin(){
   const d = await api('/portal/login', {email:E('li-email').value, password:E('li-pass').value});
