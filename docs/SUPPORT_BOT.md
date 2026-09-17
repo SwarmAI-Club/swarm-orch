@@ -15,6 +15,7 @@ Long-poll Telegram bot，無需 framework（stdlib + requests）。FAQ 自動回
 | 私隱 / 沙盒 / privacy | 私隱/沙盒說明 |
 | /human / 人工 | 轉真人＋通知 admin chat |
 | 其他 | keyword 分唔到 → 升級真人 |
+| 撳 inline button / callback | ✅ 而家都處理（callback_query 當指令） |
 
 ## 部署
 - 檔：`agent-core/swarm_support_bot.py`（main node）
