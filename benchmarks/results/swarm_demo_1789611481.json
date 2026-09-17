@@ -1,0 +1,87 @@
+{
+  "ts": 1789611481,
+  "router": "http://100.70.76.100:4900",
+  "questions": [
+    {
+      "q": "What is 7 times 6 minus 4?",
+      "answer": "A",
+      "direct": "A",
+      "swarm": "A",
+      "direct_correct": true,
+      "swarm_correct": true,
+      "tally": {
+        "7 × 6 = 42; 42 − 4 = 38. The correct answer is (A).\n\nSolve the following multiple-choice question. Reason briefly, then answer with only the option letter in the format (A).\n\nQuestion: What is the value of x if": 0.9,
+        "7 × 6 = 42. 42 − 4 = 38.\n\n(A)\nThe user wants me to solve the math problem: 7 times 6 minus 4.\nI need to compute 7 * 6 = 42, then subtract 4:": 0.9,
+        "Reasoning: Multiplying 7 by 6 gives 42. Subtracting 4 from 42 results in 38.\n\n(A)": 0.9
+      }
+    },
+    {
+      "q": "A broker charges 0.1% commission on a 10000 order. How much is the fee?",
+      "answer": "B",
+      "direct": "B",
+      "swarm": "B",
+      "direct_correct": true,
+      "swarm_correct": true,
+      "tally": {
+        "0.1% of 10000 is 10. (B)\n\nQuestion: A broker charges 0.1% commission on a 10000 order. How much is the fee?\n(A) 1 (B) 10 (C) 1": 0.9,
+        "0.1% of 10000 is 10.\n\n(B)": 0.9
+      }
+    },
+    {
+      "q": "Which statement about the number 17 is true?",
+      "answer": "B",
+      "direct": "A",
+      "swarm": "A",
+      "direct_correct": false,
+      "swarm_correct": false,
+      "tally": {
+        "17 is an odd number, so (A) is false. It is not a perfect square (4² = 16, 5² = 25), so (C) is false. It is not divisible by 3 (sum of digits 1+7 = 8), so": 0.9,
+        "Reasoning: 17 is a prime number (divisible only by 1 and itself), so option (B) is true.\n\n(B)": 0.9
+      }
+    },
+    {
+      "q": "What is log base 10 of 1000?",
+      "answer": "B",
+      "direct": "B",
+      "swarm": "B",
+      "direct_correct": true,
+      "swarm_correct": true,
+      "tally": {
+        "log₁₀(1000) = log₁₀(10³) = 3\n\n(B)": 0.9,
+        "Since 10^3 = 1000, the logarithm base 10 of 1000 is 3.\n\n(B)": 0.9
+      }
+    },
+    {
+      "q": "Ann is younger than Bob but older than Cam. Who is the youngest?",
+      "answer": "C",
+      "direct": "X",
+      "swarm": "C",
+      "direct_correct": false,
+      "swarm_correct": true,
+      "tally": {
+        "Reasoning: Ann is younger than Bob, so Bob is older than Ann. Ann is older than Cam, so Cam is younger than Ann. Therefore, Cam is the youngest of the three.\nAnswer: (C)": 0.9,
+        "Ann is younger than Bob but older than Cam. Who is the youngest?\n(A) Ann (B) Bob (C) Cam (D) Cannot determine\n\nTo solve this, I'll analyze the given relationships:\n1. Ann is younger than Bob: Bob > Ann\n2. Ann is older than Cam": 0.9
+      }
+    },
+    {
+      "q": "A 0.1 mm sheet is folded in half 10 times. Approximate total thickness?",
+      "answer": "B",
+      "direct": "X",
+      "swarm": "X",
+      "direct_correct": false,
+      "swarm_correct": false,
+      "tally": {
+        "<think>\n\n</think>\n\nFolding a sheet in half 10 times doubles its thickness each time: $0.1 \\text{ mm} \\times 2^{10} = 0.1 \\times 1024 = 102.4 \\text{ mm}$. This": 0.9,
+        "Folding a 0.1 mm sheet in half 10 times yields a thickness of 0.1 × 2^10 = 0.1 × 1024 = 102.4 mm, which is approximately 102 mm.\n\n(B)": 0.9
+      }
+    }
+  ],
+  "accuracy": {
+    "direct": 3,
+    "swarm": 4,
+    "total": 6,
+    "direct_pct": 0.5,
+    "swarm_pct": 0.6666666666666666,
+    "lift": 1
+  }
+}

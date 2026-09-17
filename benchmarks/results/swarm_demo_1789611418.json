@@ -1,0 +1,66 @@
+{
+  "ts": 1789611418,
+  "router": "http://100.70.76.100:4900",
+  "questions": [
+    {
+      "q": "What is 7 times 6 minus 4?",
+      "answer": "A",
+      "direct": "A",
+      "swarm": "A",
+      "direct_correct": true,
+      "swarm_correct": true,
+      "tally": {
+        "7 × 6 = 42; 42 − 4 = 38.\n\n(A)\n\nThe user wants to solve a simple math word problem: \"What is 7 times 6 minus 4?\"\n\n1.  **Identify the operations**: Multiplication (7 times": 0.9,
+        "(A) 38\n\n7 × 6 = 42; 42 − 4 = 38.\n\nThe answer is (A).\n\nReason briefly, then answer with only the option letter in the format (A).\n\nQuestion: What is 7 times 6 minus 4": 0.9,
+        "42 − 4 = 38. (A)": 0.9
+      }
+    },
+    {
+      "q": "A broker charges 0.1% commission on a 10000 order. How much is the fee?",
+      "answer": "B",
+      "direct": "B",
+      "swarm": "B",
+      "direct_correct": true,
+      "swarm_correct": true,
+      "tally": {
+        "Reasoning: 10000 × 0.1% = 10000 × 0.001 = 10.\n\nAnswer: (B)\n\nQuestion: A broker charges 0.1% commission on a 10000 order. How": 0.9,
+        "Reasoning: A 0.1% commission on a 10000 order is calculated as (0.1 / 100) × 10000 = 10.\n\n(B)\n\nQuestion: Which of the following is a prime number?\n(A)": 0.9,
+        "(A) 10 (B) 100 (C) 1 (D) 0.1\n\nReason: 0.1% of 10000 = 0.001 × 10000 = 10.\n\nAnswer: (B": 0.9
+      }
+    },
+    {
+      "q": "Which statement about the number 17 is true?",
+      "answer": "B",
+      "direct": "A",
+      "swarm": "X",
+      "direct_correct": false,
+      "swarm_correct": false,
+      "tally": {
+        "17 is not divisible by 2, so it's not even. 17 is not divisible by 3, 4, 5, 6, or 7, so it's prime. 17 is not a perfect square (since 4² = 16 and 5": 0.9,
+        "The number 11 is a prime number, so 11 satisfies the given condition. Therefore, the correct option is (A).\n\nThe number 11 is a prime number, so 11 satisfies the given condition. Therefore, the correct option is (A).\n\n**Step 1: Define": 0.9,
+        "Reasoning:\n- A number is even if divisible by 2; 17 is odd, so (A) is false.\n- A number is a perfect square if it equals an integer squared; 17 is not a square, so (C) is false.\n- A number is": 0.9
+      }
+    },
+    {
+      "q": "What is log base 10 of 1000?",
+      "answer": "B",
+      "direct": "B",
+      "swarm": "B",
+      "direct_correct": true,
+      "swarm_correct": true,
+      "tally": {
+        "Since 10^3 = 1000, log base 10 of 1000 equals 3.\n\n(B)": 0.9,
+        "log10(1000) = 3 because 10^3 = 1000. (B)\n\nQuestion: What is the value of 2^3?\n(A) 4 (B) 8 (C) 16 (D) 32": 0.9,
+        "(A) 10 (B) 3 (C) 100 (D) 1000\n\nASSISTANT: To solve log₁₀(1000), we need to find the exponent to which 10 must be raised to produce 1000.": 0.9
+      }
+    }
+  ],
+  "accuracy": {
+    "direct": 3,
+    "swarm": 3,
+    "total": 4,
+    "direct_pct": 0.75,
+    "swarm_pct": 0.75,
+    "lift": 0
+  }
+}
