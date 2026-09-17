@@ -9,7 +9,7 @@ Long-poll Telegram bot，無需 framework（stdlib + requests）。FAQ 自動回
 | 開戶 / 註冊 / account | Portal 開戶步驟 |
 | 安裝 / install / docker | Worker 安裝（含 --pull） |
 | token / api key | Token 點攞/點填 |
-| 點數 / swai / balance | 點數機制 ＋ /balance <client-xxx> |
+| 點數 / swai / balance | 點數機制 ＋ `私隱`：`/balance <你嘅API token>` 只睇自己；admin（SWARM_ADMIN_CHAT）先可任查 `/balance <node>` |
 | 使用 / 落單 / task / use | API 落單例 |
 | 狀態 / status | Swarm 網絡狀態（live /nodes） |
 | 私隱 / 沙盒 / privacy | 私隱/沙盒說明 |
