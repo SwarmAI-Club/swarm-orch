@@ -10,6 +10,19 @@ const CREDIT_RATE_PM = Number(process.env.SWARM_CREDIT_RATE_PM || 10); // SWAI p
 const UPTIME_RATE_PM = Number(process.env.SWARM_UPTIME_RATE_PM || 2);  // SWAI per idle min (Proof-of-Uptime)
 const NET_TOKEN = process.env.SWARM_API_TOKEN || "dev-insecure-token"; // REQUIRED, all endpoints check it
 
+// SMTP (forgot-password) — env 或 swarm-support-bot.env
+const SMTP = { user: process.env.SWARM_SMTP_USER, pass: process.env.SWARM_SMTP_PASS, host: "smtp.zoho.com", port: 465 };
+if (!SMTP.user || !SMTP.pass) {
+  try {
+    const fsx = require("fs");
+    const txt = fsx.readFileSync("/mnt/d/docker_nginx/swarm-support-bot.env", "utf8");
+    for (const ln of txt.split("\n")) {
+      if (ln.startsWith("SWARM_SMTP_USER=")) SMTP.user = ln.split("=").slice(1).join("=").trim();
+      if (ln.startsWith("SWARM_SMTP_PASS=")) SMTP.pass = ln.split("=").slice(1).join("=").trim();
+    }
+  } catch (e) {}
+}
+
 
 // ---- Time-Bank ledger (SWAI, SQLite) ----
 const DATA_DIR = process.env.SWARM_DATA_DIR || path.join(__dirname, "..", "data");
@@ -56,6 +69,12 @@ db.exec(`CREATE TABLE IF NOT EXISTS users(
   token TEXT NOT NULL,
   node_id TEXT NOT NULL,
   created INTEGER
+)`);
+db.exec(`CREATE TABLE IF NOT EXISTS user_resets(
+  email TEXT,
+  code TEXT PRIMARY KEY,
+  created INTEGER,
+  used INTEGER DEFAULT 0
 )`);
 db.exec(`CREATE TABLE IF NOT EXISTS user_keys(
   email TEXT NOT NULL,
@@ -294,7 +313,11 @@ app.get("/tasks/poll", (req, res) => {
 // ---- Client portal (login -> token -> SWAI balance) ----
 app.post("/portal/signup", (req, res) => {
   const { email, password } = req.body || {};
-  if (!email || !password || String(password).length < 8) return res.status(400).json({ ok: false, error: "email + password(>=8) required" });
+  if (!email || !password) return res.status(400).json({ ok: false, error: "email + password required" });
+  const pw = String(password);
+  if (pw.length < 13) return res.status(400).json({ ok: false, error: "密碼至少 13 位" });
+  if (!/[a-z]/.test(pw) || !/[A-Z]/.test(pw) || !/[0-9]/.test(pw) || !/[^A-Za-z0-9]/.test(pw))
+    return res.status(400).json({ ok: false, error: "密碼要同時有大階+細階+數字+符號" });
   const e = String(email).toLowerCase();
   if (userByEmail(e)) return res.status(409).json({ ok: false, error: "email already registered" });
   const token = mkToken();
@@ -319,6 +342,45 @@ app.get("/portal/me", (req, res) => {
   if (!u) return res.status(401).json({ ok: false, error: "invalid token" });
   const led = db.prepare("SELECT * FROM ledger WHERE node_id=? ORDER BY id DESC LIMIT 20").all(u.node_id);
   res.json({ ok: true, email: u.email, node_id: u.node_id, balance: creditBalance(u.node_id), journal: led });
+});
+
+app.post("/portal/forgot", (req, res) => {
+  const email = String((req.body || {}).email || "").toLowerCase();
+  const u = userByEmail(email);
+  if (u) {
+    const code = mkToken();
+    db.prepare("INSERT INTO user_resets(email, code, created) VALUES(?,?,?)").run(email, code, Date.now());
+    // 刪舊（<30min 前嘅）reset code
+    db.prepare("DELETE FROM user_resets WHERE email=? AND created < ?").run(email, Date.now() - 1800 * 1000);
+    const link = `https://swarmai.club/portal/?code=${code}`;
+    if (SMTP.user && SMTP.pass) {
+      try {
+        require("child_process").exec(
+          `python3 -c "import smtplib,os,sys; s=smtplib.SMTP_SSL(os.environ['HOST'],os.environ['PORT']); s.login(os.environ['U'],os.environ['P']); m='From: support@swarmai.club\nTo: '+sys.argv[1]+'\nSubject: SwarmAI password reset\n\nReset your password here:\n'+sys.argv[2]; s.sendmail(os.environ['U'],[sys.argv[1]],m.encode()); s.quit()" "${email}" "${link}"`,
+          { env: { ...process.env, HOST: SMTP.host, PORT: String(SMTP.port), U: SMTP.user, P: SMTP.pass }, timeout: 20000 },
+          (err) => { if (err) console.log("[forgot] SMTP send failed:", String(err.message).slice(0, 140)); });
+      } catch (e) { console.log("[forgot] smtp err:", String(e).slice(0,120)); }
+    }
+  }
+  // 一律回 ok，防 enum
+  res.json({ ok: true, hint: "如果帳戶存在，會收到重置連結" });
+});
+
+app.post("/portal/reset", (req, res) => {
+  const code = String((req.body || {}).code || "");
+  const pw = String((req.body || {}).password || "");
+  if (pw.length < 13) return res.status(400).json({ ok: false, error: "密碼至少 13 位" });
+  if (!/[a-z]/.test(pw) || !/[A-Z]/.test(pw) || !/[0-9]/.test(pw) || !/[^A-Za-z0-9]/.test(pw))
+    return res.status(400).json({ ok: false, error: "密碼要同時有大階+細階+數字+符號" });
+  const row = db.prepare("SELECT * FROM user_resets WHERE code=? AND used=0").get(code);
+  if (!row) return res.status(400).json({ ok: false, error: "連結無效/過期" });
+  if (Date.now() - row.created > 30 * 60 * 1000) {
+    db.prepare("UPDATE user_resets SET used=1 WHERE code=?").run(code);
+    return res.status(400).json({ ok: false, error: "連結過期，請再申請" });
+  }
+  db.prepare("UPDATE users SET pass_hash=? WHERE email=?").run(hashPass(pw), row.email);
+  db.prepare("UPDATE user_resets SET used=1 WHERE code=?").run(code);
+  res.json({ ok: true, message: "密碼已重置，可以登入" });
 });
 
 app.get("/portal/keys", (req, res) => {
