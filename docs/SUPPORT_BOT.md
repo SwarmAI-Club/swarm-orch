@@ -33,4 +33,4 @@ Long-poll Telegram bot，無需 framework（stdlib + requests）。FAQ 自動回
    ```
 3. 重啟 bot（kill 舊 process + re-launch）
 
-> ✅ 2026-09-17: 已改用 **專屬 token**（@SwarmAI_Club_bot）；code **只讀 `SWARM_SUPPORT_BOT_TOKEN`**（唔再 fallback 去 opencode token），並有 **409 startup guard** —— 唔會再同 opencode-telegram 搶。
+> ✅ 2026-09-17: 已改用 **專屬 token**（@SwarmAI_Club_bot）＋ **flock 單一 instance 保證**（任何 respawner 都起唔到第二隻）＋ admin 通知包含**客戶名稱**（first_name/username）；code **只讀 `SWARM_SUPPORT_BOT_TOKEN`**（唔再 fallback 去 opencode token），並有 **409 startup guard** —— 唔會再同 opencode-telegram 搶。
