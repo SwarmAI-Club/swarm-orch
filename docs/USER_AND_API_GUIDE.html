@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SwarmAI — 用戶流程 & API 流程</title>
+<style>
+:root{--bg:#0a0e17;--card:#111827;--acc:#22d3ee;--acc2:#a855f7;--ok:#22c55e;--warn:#f59e0b;--txt:#e5e7eb;--muted:#94a3b8}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,monospace;background:var(--bg);color:var(--txt);line-height:1.6;padding:20px}
+.wrap{max-width:1000px;margin:0 auto}
+h1{font-size:1.6rem;background:linear-gradient(90deg,var(--acc),var(--acc2));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+.sub{color:var(--muted);margin-bottom:20px}
+section{background:var(--card);border:1px solid #1f2937;border-radius:14px;padding:20px;margin:18px 0}
+h2{font-size:1.15rem;color:var(--acc);margin-bottom:12px}
+h3{font-size:.95rem;color:var(--txt);margin:10px 0 6px}
+p,li{font-size:.88rem;color:#cbd5e1}
+code{background:#0b1220;padding:1px 6px;border-radius:5px;font-size:.8rem;color:#7dd3fc}
+pre{background:#0b1220;border:1px solid #1f2937;border-radius:8px;padding:12px;overflow-x:auto;font-size:.78rem;color:#b9cbe0;margin:8px 0}
+table{width:100%;border-collapse:collapse;font-size:.8rem}
+th,td{text-align:left;padding:8px 9px;border-bottom:1px solid #1f2937}
+th{color:var(--acc)}
+.badge{display:inline-block;border-radius:999px;padding:2px 10px;font-size:.72rem;font-weight:700}.ok{background:var(--ok);color:#04120a}.push{background:var(--acc);color:#04121a}.pull{background:var(--acc2);color:#12041a}.idle{background:var(--warn);color:#1a1204}
+path.flow{stroke:#334155;stroke-width:1.5;fill:none}
+text.lbl{font-size:12px;fill:#cbd5e1}
+tspan.s{fill:#94a3b8}
+.chart{width:100%;height:auto;margin:12px 0}
+@media(max-width:640px){.wrap{padding:8px}h1{font-size:1.25rem}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>🐝 SwarmAI — 用戶流程 & API 流程</h1>
+<div class="sub">完整引導：由註冊 → 攞 token → 部署 → 接任務 → 賺 SWAI；以及背後成條 API 用邊個 call、點行。</div>
+
+<!-- ============ PART A : USER PROCESS ============ -->
+<section>
+<h2>🪙 Part A — 用戶完整流程</h2>
+<ol style="padding-left:20px">
+<li><b>開戶</b> — 去 <code>https://swarmai.club/portal/</code> → <b>Sign up</b>（email+password）→ 即派你條 <code>X-Swarm-Token</code> + <code>node_id</code>（<code>client-xxx</code>）。</li>
+<li><b>準備模型</b> — 你部機開 llama.cpp：<code>./llama-server -m Qwythos-9B-….gguf --port 8080 -ngl 99</code></li>
+<li><b>部署 Worker（Docker，NAT 後都得）</b> — 只填 3 樣：router 地址、token、node_id，用 <code>--pull</code> 淨係 outbound poll。
+<pre>docker run -d --name swarm-worker \
+  -e SWARM_ROUTER="https://swarmai.club/swarm" \
+  -e SWARM_API_TOKEN="<token>" \
+  -e SWARM_COMPLETION="http://host.docker.internal:8080/completion" \
+  swarm-worker python worker.py \
+    --router "https://swarmai.club/swarm" --token "$SWARM_API_TOKEN" \
+    --completion "$SWARM_COMPLETION" --node-id "client-xxx" \
+    --capabilities reasoning math code --pull --heartbeat 30</pre></li>
+<li><b>註冊 + 心跳</b> — Worker 上線 <code>POST /register</code>；之後每 <b>30s</b> 發 <code>POST /status</code>。瞓覺/空閒時行 <code>IDLE_SHARING</code> → 啟動 <b>Proof-of-Uptime</b>（賺 SWAI）。</li>
+<li><b>接任務投票</b> — 客人開 <code>/task</code>，Router 派工：LAN node 被 push、你（NAT）用 poll 攞工 → 你部機跑 <code>n_votes</code> 次 → 交 <code>/result</code>。</li>
+<li><b>賺 SWAI</b> — 任務完成 <code>/vote</code> 自動照 <code>gpu_min×10</code> mint；瞓覺 idle 照 <code>min×2</code> mint。查額：<code>GET /credits/&lt;node&gt;</code> 或 portal 頁面。</li>
+</ol>
+<p class="sub" style="margin-top:8px">工人嘅身份 = email（帳戶）；無需自架 router；唔需要 Tailscale；唔使開 port。</p>
+</section>
+
+<!-- ============ FLOWCHART ============ -->
+<section>
+<h2>📊 流程圖</h2>
+<svg class="chart" viewBox="0 0 960 380" xmlns="http://www.w3.org/2000/svg">
+  <!-- lanes -->
+  <text x="10" y="24" class="lbl" font-weight="700">用戶 / Front</text>
+  <line x1="10" y1="30" x2="950" y2="30" class="flow"/>
+  <text x="10" y="150" class="lbl" font-weight="700">Router（中樞）</text>
+  <line x1="10" y1="156" x2="950" y2="156" class="flow"/>
+  <text x="10" y="330" class="lbl" font-weight="700">GPU Workers（LAN push / NAT pull）</text>
+  <line x1="10" y1="336" x2="950" y2="336" class="flow"/>
+
+  <!-- user lane -->
+  <rect x="40" y="45" width="150" height="44" rx="10" fill="#111827" stroke="#22d3ee"/>
+  <text x="115" y="63" text-anchor="middle" class="lbl" font-size="12">1️⃣ Portal Signup</text>
+  <text x="115" y="80" text-anchor="middle" class="lbl" font-size="10" fill="#94a3b8">email → token + node_id</text>
+  <rect x="250" y="45" width="150" height="44" rx="10" fill="#111827" stroke="#22d3ee"/>
+  <text x="325" y="63" text-anchor="middle" class="lbl" font-size="12">2️⃣ Docker Worker</text>
+  <text x="325" y="80" text-anchor="middle" class="lbl" font-size="10" fill="#94a3b8">--router / --token / --node-id</text>
+  <rect x="460" y="45" width="150" height="44" rx="10" fill="#111827" stroke="#a855f7"/>
+  <text x="535" y="63" text-anchor="middle" class="lbl" font-size="12">3️⃣ Client 開 /task</text>
+  <text x="535" y="80" text-anchor="middle" class="lbl" font-size="10" fill="#94a3b8">問問題 / 要投票</text>
+  <rect x="670" y="45" width="160" height="44" rx="10" fill="#111827" stroke="#22c55e"/>
+  <text x="750" y="63" text-anchor="middle" class="lbl" font-size="12">4️⃣ 攞答案</text>
+  <text x="750" y="80" text-anchor="middle" class="lbl" font-size="10" fill="#94a3b8">weighted vote</text>
+  <path d="M190,67 L248,67" class="flow" marker-end="url(#a)"/>
+  <path d="M400,67 L458,67" class="flow" marker-end="url(#a)"/>
+  <path d="M610,67 L668,67" class="flow" marker-end="url(#a)"/>
+
+  <!-- router lane -->
+  <rect x="460" y="170" width="170" height="46" rx="10" fill="#111827" stroke="#22d3ee"/>
+  <text x="545" y="192" text-anchor="middle" class="lbl" font-size="12">Router</text>
+  <text x="545" y="208" text-anchor="middle" class="lbl" font-size="10" fill="#94a3b8">capability match</text>
+  <rect x="150" y="170" width="150" height="46" rx="10" fill="#111827" stroke="#94a3b8"/>
+  <text x="225" y="192" text-anchor="middle" class="lbl" font-size="11">inbox (pull nodes)</text>
+  <text x="225" y="208" text-anchor="middle" class="lbl" font-size="10" fill="#94a3b8">/tasks/poll</text>
+  <rect x="700" y="170" width="150" height="46" rx="10" fill="#111827" stroke="#94a3b8"/>
+  <text x="775" y="192" text-anchor="middle" class="lbl" font-size="11">/vote 加權 majority</text>
+  <text x="775" y="208" text-anchor="middle" class="lbl" font-size="10" fill="#94a3b8">+ SWAI mint</text>
+
+  <!-- workers lane -->
+  <rect x="90" y="350" width="200" height="44" rx="10" fill="#111827" stroke="#22c55e"/>
+  <text x="190" y="368" text-anchor="middle" class="lbl" font-size="11">LAN node（push）</text>
+  <text x="190" y="385" text-anchor="middle" class="lbl" font-size="10" fill="#94a3b8">router → /assign</text>
+  <rect x="370" y="350" width="200" height="44" rx="10" fill="#111827" stroke="#a855f7"/>
+  <text x="470" y="368" text-anchor="middle" class="lbl" font-size="11">NAT node（pull）</text>
+  <text x="470" y="385" text-anchor="middle" class="lbl" font-size="10" fill="#94a3b8">poll /tasks/poll</text>
+  <rect x="650" y="350" width="180" height="44" rx="10" fill="#111827" stroke="#22c55e"/>
+  <text x="740" y="368" text-anchor="middle" class="lbl" font-size="11">交 votes</text>
+  <text x="740" y="385" text-anchor="middle" class="lbl" font-size="10" fill="#94a3b8">POST /result × n</text>
+
+  <!-- arrows router<->workers -->
+  <path d="M225,216 C195,250 190,320 190,348" class="flow" marker-end="url(#a)"/>
+  <path d="M545,216 C540,260 470,340 470,348" class="flow" marker-end="url(#a)" stroke-dasharray="4 3"/>
+  <path d="M470,350 C620,300 770,280 775,218" class="flow" marker-end="url(#a)" stroke-dasharray="4 3"/>
+  <!-- client -> router -->
+  <path d="M535,91 C538,130 545,150 545,168" class="flow" marker-end="url(#a)"/>
+  <!-- router -> vote+answer -->
+  <path d="M632,193 L698,193" class="flow" marker-end="url(#a)"/>
+  <path d="M775,218 C780,180 750,120 750,91" class="flow" marker-end="url(#a)" stroke="url(#g)"/>
+  <defs>
+    <marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#334155"/></marker>
+  </defs>
+</svg>
+<div style="color:var(--muted);font-size:.78rem;margin-top:6px">實線 = push 派工 / 提交；虛線 = pull poll / 回傳。Router 係中樞，Workers 只交結果。（肝：本圖為 SVG 手繪簡圖，非程式產生。）</div>
+</section>
+
+<!-- ============ PART B : API PROCESS ============ -->
+<section>
+<h2>🔌 Part B — 成條 API 流程（順序）</h2>
+<ol style="padding-left:20px">
+<li><b>Auth</b> — 除咗 <code>/portal/signup|login</code>，全部 call 都要 header <code>X-Swarm-Token: &lt;token&gt;</code>（無 → 401）。</li>
+<li><b>POST /register</b> — worker 上線註冊（capabilities / model / url / <code>pull</code> flag）。</li>
+<li><b>POST /status</b> — 每 30s 心跳；<code>IDLE_SHARING</code> 累積 uptime → Proof-of-Uptime。</li>
+<li><b>POST /task</b> — 客人開工（prompt + capabilities + n_votes）→ Router 揀 node：<br>
+　· LAN node → Router 直 <code>POST &lt;node&gt;/assign</code>（push）<br>
+　· NAT node → 排入 <b>inbox</b>，等佢 <code>GET /tasks/poll</code> 攞。</li>
+<li><b>Worker 跑 votes</b> → <b>POST /result</b>（含 content + confidence + duration_ms）。可 <code>GET /results/:task_id</code> 睇齊唔齊。</li>
+<li><b>POST /vote</b> — Router 加權 majority（Σ confidence）→ 出 winner；同場每個 provider 按 <code>gpu_min×10</code> 自動 mint SWAI 入 <code>data/ledger.db</code>。</li>
+<li><b>查帳</b> — <code>GET /credits/:node</code> · <code>GET /ledger/latest</code> · portal <code>/portal/me</code>（balance + journal）。</li>
+</ol>
+
+<h3>Endpoint 速查表</h3>
+<table>
+<tr><th>Method+Path</th><th>Auth</th><th>用途</th></tr>
+<tr><td>POST /portal/signup</td><td class="badge ok">公開</td><td>開戶 → 派 token + node_id</td></tr>
+<tr><td>POST /portal/login</td><td class="badge ok">公開</td><td>登入 → 攞 token + balance</td></tr>
+<tr><td>GET /portal/me</td><td class="badge pull">你的 token</td><td>帳戶 + balance + journal</td></tr>
+<tr><td>POST /register</td><td class="badge push">token</td><td>註冊 worker（含 pull flag）</td></tr>
+<tr><td>POST /status</td><td class="badge push">token</td><td>心跳 / PoU 累積</td></tr>
+<tr><td>POST /task</td><td class="badge push">token</td><td>派工（push + queue）</td></tr>
+<tr><td>GET /tasks/poll?node_id=</td><td class="badge pull">你的 token</td><td>NAT worker 攞工</td></tr>
+<tr><td>POST /assign（at worker）</td><td class="badge ok">LAN</td><td>router push 派工入 worker</td></tr>
+<tr><td>POST /result</td><td class="badge push">token</td><td>交 votes</td></tr>
+<tr><td>GET /results/:task_id</td><td class="badge push">token</td><td>查進度</td></tr>
+<tr><td>POST /vote</td><td class="badge push">token</td><td>加權投票 + SWAI mint</td></tr>
+<tr><td>GET /nodes /credits/:node /ledger/latest</td><td class="badge push">token</td><td>查網 / 查額 / 查流水</td></tr>
+</table>
+
+<h3>一齊行嘅例子（curl）</h3>
+<pre>TOK=&lt;你的 token&gt;; R=https://swarmai.club/swarm
+curl -s -H "x-swarm-token:$TOK" "$R/register" ...   # 選註冊
+curl -s -H "x-swarm-token:$TOK" -X POST "$R/task" \
+  -d '{"prompt":"…","required_capabilities":["reasoning"],"n_votes":3}'
+# …等 workers 交 result…
+curl -s -H "x-swarm-token:$TOK" "$R/results/<task_id>"
+curl -s -H "x-swarm-token:$TOK" -X POST "$R/vote" -d '{"task_id":"…","beacon_id":"…"}'
+curl -s -H "x-swarm-token:$TOK" "$R/credits/<node_id>"   # 睇 SWAI</pre>
+</section>
+
+<footer class="sub" style="margin-top:12px">swarmai.club · 開源 MIT · SwarmAI-Club/swarm-orch</footer>
+</div>
+</body>
+</html>
