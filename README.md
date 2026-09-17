@@ -7,7 +7,7 @@ Cross-timezone, asynchronous compute sharing for home GPUs. MIT · [swarmai.club
 
 ## North Star
 
-Home users lend their GPU during their local night / idle hours (Proof-of-Uptime, earning **SWAI token units** (off-chain settlement)).
+Home users lend their GPU during their local night / idle hours (Proof-of-Uptime, earning **SWAI token units**, off-chain settlement).
 When they need heavy AI work during their day, they call on GPUs of users currently sleeping in other time zones — a "reverse sundial" of idle compute. Open, auditable, decentralized — no big-tech data center required.
 
 ## Architecture
@@ -15,7 +15,7 @@ When they need heavy AI work during their day, they call on GPUs of users curren
 ```
 Notebook (local, private) ── privacy filter ──┐
                                              ▼
-          Router (Node)  :4900   ──  Time-Bank credit ledger (SQLite)
+          Router (Node)  :4900   ──  SWAI token ledger (SQLite, off-chain)
            │  beacon / node_status
            ▼
     Worker (Python, llama-server /completion)      ← optional Docker sandbox
@@ -31,7 +31,7 @@ Notebook (local, private) ── privacy filter ──┐
 
 | Path | What |
 |------|------|
-| `router/router.js` | Node orchestrator: registry, capability matching (Jaccard), beacon/assign/vote, **Time-Bank SQLite credit ledger** (`data/ledger.db`), `/status` heartbeat |
+| `router/router.js` | Node orchestrator: registry, capability matching (Jaccard), beacon/assign/vote, **SWAI token ledger** (`data/ledger.db`, off-chain), `/status` heartbeat |
 | `worker-node/worker.py` | Python worker: `node_register`, serves `/health` `/beacon` `/assign`, runs llama-server `/completion` CoT votes, posts `task_result`, optional heartbeat |
 | `agent/swarm_agent.py` | Client daemon ("first DNA"): timezone sleep-window detection, manual Share Mode (`auto|on|off`), `node_register` + periodic `node_status`; `--mock` for no-GPU testing |
 | `sandbox/` | **Zero-Knowledge sandbox v1**: Docker image (GPU-only, read-only FS, no host mounts) + `run-worker.sh` |
@@ -78,13 +78,13 @@ SWARM_COMPLETION=http://100.106.211.51:8087/completion bash sandbox/run-worker.s
 
 ```bash
 python3 agent/smoke_test.py      # agent register + heartbeat
-node router/ledger_test.js       # Time-Bank mint/burn/vote-mint
+node router/ledger_test.js       # SWAI token mint/burn/vote-mint
 python3 benchmarks/swarm_demo.py # direct vs swarm accuracy
 ```
 
 ## Roadmap & Milestones
 
-See [ROADMAP.md](ROADMAP.md). M0–M6 done (protocol v0.2, agent daemon, credit ledger, sandbox, 3×Qwythos demo, notebook/privacy+MCP). Outstanding: rtx2060a worker online · libp2p transport · WASM sandbox · federated fine-tune (research).
+See [ROADMAP.md](ROADMAP.md). M0–M9 done (protocol v0.2, agent daemon, SWAI token ledger, sandbox, 5×Qwythos demo direct 50%→100%, notebook/privacy+MCP, monitoring+email, token strategy). Outstanding: libp2p transport · WASM sandbox · on-chain settlement (batch) · federated fine-tune (research).
 
 ## License
 
