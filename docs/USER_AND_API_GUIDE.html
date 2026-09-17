@@ -42,7 +42,7 @@ tspan.s{fill:#94a3b8}
 <li><b>部署 Worker（Docker，NAT 後都得）</b> — 只填 3 樣：router 地址、token、node_id，用 <code>--pull</code> 淨係 outbound poll。
 <pre>docker run -d --name swarm-worker \
   -e SWARM_ROUTER="https://swarmai.club/swarm" \
-  -e SWARM_API_TOKEN="<token>" \
+  -e SWARM_API_TOKEN="&lt;token&gt;" \
   -e SWARM_COMPLETION="http://host.docker.internal:8080/completion" \
   swarm-worker python worker.py \
     --router "https://swarmai.club/swarm" --token "$SWARM_API_TOKEN" \
@@ -160,9 +160,9 @@ curl -s -H "x-swarm-token:$TOK" "$R/register" ...   # 選註冊
 curl -s -H "x-swarm-token:$TOK" -X POST "$R/task" \
   -d '{"prompt":"…","required_capabilities":["reasoning"],"n_votes":3}'
 # …等 workers 交 result…
-curl -s -H "x-swarm-token:$TOK" "$R/results/<task_id>"
+curl -s -H "x-swarm-token:$TOK" "$R/results/&lt;task_id&gt;"
 curl -s -H "x-swarm-token:$TOK" -X POST "$R/vote" -d '{"task_id":"…","beacon_id":"…"}'
-curl -s -H "x-swarm-token:$TOK" "$R/credits/<node_id>"   # 睇 SWAI</pre>
+curl -s -H "x-swarm-token:$TOK" "$R/credits/&lt;node_id&gt;"   # 睇 SWAI</pre>
 </section>
 
 <footer class="sub" style="margin-top:12px">swarmai.club · 開源 MIT · SwarmAI-Club/swarm-orch</footer>
