@@ -62,6 +62,7 @@ class Worker:
             "max_context": args.max_context,
             "speed": args.speed,
             "url": f"http://{args.listen}:{args.port}",
+            "pull": args.pull,
         }
 
     def register(self, retries=3, delay=2):
@@ -158,6 +159,25 @@ def make_handler(worker):
     return H
 
 
+
+def _poll_loop(worker):
+    """Pull-mode worker: poll router inbox, run votes, post results. Only OUTBOUND needed."""
+    while True:
+        try:
+            r = requests.get(worker.args.router.rstrip("/") + "/tasks/poll",
+                             params={"node_id": worker.args.node_id}, headers=_headers(worker.args), timeout=20)
+            r.raise_for_status()
+            tasks = r.json().get("tasks") or []
+            for t in tasks:
+                worker.on_assign({"task_id": t["task_id"], "beacon_id": t.get("beacon_id"),
+                                  "prompt": t.get("prompt", ""), "n_votes": t.get("n_votes", 3),
+                                  "temperature": t.get("temperature", 0.6)})
+            if tasks:
+                print(f"[worker] pull processed {len(tasks)} task(s)", flush=True)
+        except Exception as e:
+            print(f"[worker] poll FAIL: {e}", file=sys.stderr, flush=True)
+        time.sleep(3)
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--router", default=os.environ.get("SWARM_ROUTER", "http://100.70.76.100:4900"))
@@ -174,6 +194,7 @@ def main():
     ap.add_argument("--listen", default="0.0.0.0")
     ap.add_argument("--n-predict", type=int, default=128)
     ap.add_argument("--heartbeat", type=int, default=0, help="heartbeat interval sec (0=off)")
+    ap.add_argument("--pull", action="store_true", help="pull-mode: 唔使 inbound，poll router /tasks/poll 攞任務（NAT 後安全）")
     args = ap.parse_args()
     if not args.completion:
         print("--completion 必填（llama-server /completion URL）或 用 SWARM_COMPLETION env", file=sys.stderr)
@@ -185,6 +206,12 @@ def main():
     worker = Worker(args)
     if not worker.register():
         sys.exit(1)
+
+    if args.pull:
+        # pull-mode: 無需 inbound；淨係 outbound polls router
+        print(f"[worker] PULL-mode (NAT-safe): polling {args.router}/tasks/poll every 3s")
+        _poll_loop(worker)
+        return
 
     httpd = ThreadingHTTPServer((args.listen, args.port), make_handler(worker))
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
