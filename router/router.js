@@ -48,14 +48,33 @@ function ledgerBurn(nodeId, credit, taskId, note = "") {
     .run(Date.now(), "burn", nodeId, taskId || null, 0, actual, note);
   return actual;
 }
+
+// ---- Client portal: users (email login -> own API token) ----
+db.exec(`CREATE TABLE IF NOT EXISTS users(
+  email TEXT PRIMARY KEY,
+  pass_hash TEXT NOT NULL,
+  token TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  created INTEGER
+)`);
+function hashPass(p) { return crypto.scryptSync(String(p), "swaimail", 32).toString("hex"); }
+function mkNodeId(email) {
+  return "client-" + String(email).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32);
+}
+function mkToken() { return "swai-" + crypto.randomBytes(16).toString("hex"); }
+function findUserByToken(t) { return db.prepare("SELECT * FROM users WHERE token=?").get(String(t)); }
+function userByEmail(e) { return db.prepare("SELECT * FROM users WHERE email=?").get(String(e).toLowerCase()); }
+
 const nodes = require(CONFIG);
 
 const app = express();
 app.use(express.json());
 // ---- Auth: all endpoints require X-Swarm-Token ----
 app.use((req, res, next) => {
+  const p0 = req.path;
+  if (p0 === "/portal" || p0.startsWith("/portal/login") || p0.startsWith("/portal/signup")) return next();
   const t = req.get("x-swarm-token");
-  if (t !== NET_TOKEN) return res.status(401).json({ ok: false, error: "invalid x-swarm-token" });
+  if (t !== NET_TOKEN && !findUserByToken(t)) return res.status(401).json({ ok: false, error: "invalid x-swarm-token" });
   next();
 });
 
@@ -201,5 +220,40 @@ setInterval(() => {
     }
   }
 }, 10 * 60 * 1000).unref();
+
+
+// ---- Client portal (login -> token -> SWAI balance) ----
+app.post("/portal/signup", (req, res) => {
+  const { email, password } = req.body || {};
+  if (!email || !password || String(password).length < 8) return res.status(400).json({ ok: false, error: "email + password(>=8) required" });
+  const e = String(email).toLowerCase();
+  if (userByEmail(e)) return res.status(409).json({ ok: false, error: "email already registered" });
+  const token = mkToken();
+  const node_id = mkNodeId(e);
+  db.prepare("INSERT INTO users(email,pass_hash,token,node_id,created) VALUES(?,?,?,?,?)")
+    .run(e, hashPass(password), token, node_id, Date.now());
+  res.json({ ok: true, email: e, api_token: token, node_id });
+});
+
+app.post("/portal/login", (req, res) => {
+  const { email, password } = req.body || {};
+  const u = userByEmail(email);
+  if (!u || u.pass_hash !== hashPass(password)) return res.status(401).json({ ok: false, error: "bad credentials" });
+  res.json({ ok: true, email: u.email, api_token: u.token, node_id: u.node_id, balance: creditBalance(u.node_id) });
+});
+
+app.get("/portal/me", (req, res) => {
+  const t = req.get("x-swarm-token");
+  const u = findUserByToken(t);
+  if (!u) return res.status(401).json({ ok: false, error: "invalid token" });
+  const led = db.prepare("SELECT * FROM ledger WHERE node_id=? ORDER BY id DESC LIMIT 20").all(u.node_id);
+  res.json({ ok: true, email: u.email, node_id: u.node_id, balance: creditBalance(u.node_id), journal: led });
+});
+
+app.get("/portal", (_, res) => {
+  const html = fs.readFileSync(path.join(__dirname, "portal.html"));
+  res.type("html").send(html);
+});
+
 
 app.listen(PORT, "0.0.0.0", () => console.log(`[swarm-router] listening :${PORT} (${registry.size} registered)`));
