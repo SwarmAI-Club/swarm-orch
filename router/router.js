@@ -81,6 +81,7 @@ app.use((req, res, next) => {
 const registry = new Map();       // node_id -> capabilities/model/gpu/url
 const pendingBeacons = new Map(); // beacon_id -> {required, responses, ts}
 const resultsStore = new Map();   // task_id -> {ts, list: task_result[]}
+const inbox = new Map();          // node_id -> [{task_id,prompt,n_votes,temperature}] (pull mode)
 
 function jaccard(a, b) {
   if (!a.length || !b.length) return 0;
@@ -100,7 +101,7 @@ function matchCapabilities(required, candidates) {
 app.post("/register", (req, res) => {
   const { node_id, capabilities, model, gpu, max_context, speed, url } = req.body;
   const n = registry.get(node_id) || { uptime_s: 0, last_status: null };
-  Object.assign(n, { node_id, capabilities, model, gpu, max_context, speed, url });
+  Object.assign(n, { node_id, capabilities, model, gpu, max_context, speed, url, pull: !!req.body.pull });
   registry.set(node_id, n);
   res.json({ ok: true, nodes: registry.size, uptime_rate_pm: UPTIME_RATE_PM, credit_rate_pm: CREDIT_RATE_PM });
 });
@@ -221,6 +222,49 @@ setInterval(() => {
   }
 }, 10 * 60 * 1000).unref();
 
+
+
+// ---- Task orchestration (router-centric: push for LAN, pull for NAT nodes) ----
+app.post("/task", async (req, res) => {
+  const { beacon_id, prompt, required_capabilities = ["reasoning"], n_votes = 3, temperature = 0.6 } = req.body || {};
+  if (!prompt) return res.status(400).json({ ok: false, error: "prompt required" });
+  const bid = beacon_id || crypto.randomUUID();
+  const task_id = crypto.randomUUID();
+  const matches = matchCapabilities(required_capabilities, [...registry.values()]);
+  const pushed = [], queued = [], failed = [];
+  const payload = { task_id, beacon_id: bid, prompt, n_votes, temperature };
+  for (const { node, score } of matches.slice(0, (req.body.max_targets || CONFIG.max_beacon_targets || 5))) {
+    try {
+      if (node.pull) {
+        const q = inbox.get(node.node_id) || [];
+        q.push({ ...payload, ts: Date.now() });
+        inbox.set(node.node_id, q);
+        queued.push({ node_id: node.node_id, pull: true });
+      } else {
+        await fetch(`${node.url}/assign`, { method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload), signal: AbortSignal.timeout(60000) });
+        pushed.push({ node_id: node.node_id, pull: false });
+      }
+    } catch (e) {
+      failed.push({ node_id: node.node_id, error: e.message });
+    }
+  }
+  res.json({ ok: true, task_id, beacon_id: bid, pushed, queued, failed });
+});
+
+app.get("/results/:task_id", (req, res) => {
+  const rec = resultsStore.get(req.params.task_id);
+  res.json({ task_id: req.params.task_id, done: rec ? rec.list.length : 0, results: rec ? rec.list : [] });
+});
+
+app.get("/tasks/poll", (req, res) => {
+  const { node_id } = req.query;
+  if (!node_id) return res.status(400).json({ ok: false, error: "node_id required" });
+  const q = inbox.get(String(node_id)) || [];
+  if (q.length) inbox.set(String(node_id), []);
+  res.json({ ok: true, tasks: q });
+});
 
 // ---- Client portal (login -> token -> SWAI balance) ----
 app.post("/portal/signup", (req, res) => {
