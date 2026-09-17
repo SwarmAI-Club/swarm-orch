@@ -40,7 +40,7 @@ MILESTONES.md（cluster tracker）+ 本 ROADMAP。
 - `sandbox/run-worker.sh`：起 container worker，環境變數傳 router/completion/capabilities
 - 目標：remote 任務只能 call `/completion`，接觸唔到本機檔案系統
 
-### M5 ✅ Swarm-Reasoning Demo（3× → 5× Qwythos）— done 2026-09-17: BBH-lite 6Q direct 50% → swarm 100% (+rtx2060a/b 之後再驗證)
+### M5 ✅ Swarm-Reasoning Demo（5× Qwythos）— done 2026-09-17: BBH-lite 6Q **direct 50% → swarm 100%**（+rtx2060a/b 於 2026-09-17 第三輪驗證，全系統 audit pass）
 - live nodes（2026-09-17 校準）：main `100.70.76.100:8087`（qwythos-1m-main）、
   rtx2080ti `100.106.211.51:8087`（qwythos-1m，**nodes.json port 修正 8085→8087**）、
   rtx3060 `100.97.2.13:8080`（qwythos-1m）
