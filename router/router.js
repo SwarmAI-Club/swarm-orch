@@ -57,12 +57,24 @@ db.exec(`CREATE TABLE IF NOT EXISTS users(
   node_id TEXT NOT NULL,
   created INTEGER
 )`);
+db.exec(`CREATE TABLE IF NOT EXISTS user_keys(
+  email TEXT NOT NULL,
+  token TEXT PRIMARY KEY,
+  label TEXT,
+  created INTEGER
+)`);
+db.exec(`INSERT OR IGNORE INTO user_keys(email, token, label, created) SELECT email, token, 'primary', created FROM users`);
 function hashPass(p) { return crypto.scryptSync(String(p), "swaimail", 32).toString("hex"); }
 function mkNodeId(email) {
   return "client-" + String(email).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32);
 }
 function mkToken() { return "swai-" + crypto.randomBytes(16).toString("hex"); }
-function findUserByToken(t) { return db.prepare("SELECT * FROM users WHERE token=?").get(String(t)); }
+function findUserByToken(t) {
+  return db.prepare("SELECT u.email, u.node_id, u.created AS acct_created, k.token, k.label FROM user_keys k JOIN users u ON u.email=k.email WHERE k.token=?").get(String(t));
+}
+function listKeysByToken(t) {
+  return db.prepare("SELECT token, label, created FROM user_keys WHERE email=(SELECT email FROM user_keys WHERE token=?)").all(String(t));
+}
 function userByEmail(e) { return db.prepare("SELECT * FROM users WHERE email=?").get(String(e).toLowerCase()); }
 
 const nodes = require(CONFIG);
@@ -233,6 +245,16 @@ app.post("/task", async (req, res) => {
   const matches = matchCapabilities(required_capabilities, [...registry.values()]);
   const pushed = [], queued = [], failed = [];
   const payload = { task_id, beacon_id: bid, prompt, n_votes, temperature };
+
+  // 自動扣費：一般用戶（user token）要先有餘額，一次任務收 TASK_FEE（default 10 SWAI）
+  const TASK_FEE = Number(process.env.SWARM_TASK_FEE || 10);
+  const reqTok = req.get("x-swarm-token");
+  const reqUser = reqTok ? findUserByToken(reqTok) : null;
+  if (reqUser && reqTok !== NET_TOKEN) {
+    const bal = creditBalance(reqUser.node_id);
+    if (bal < TASK_FEE) return res.status(402).json({ ok: false, error: "SWAI 餘額不足，唔夠出 task", balance: bal, fee: TASK_FEE });
+    ledgerBurn(reqUser.node_id, TASK_FEE, task_id, "task");
+  }
   for (const { node, score } of matches.slice(0, (req.body.max_targets || CONFIG.max_beacon_targets || 5))) {
     try {
       if (node.pull) {
@@ -276,6 +298,8 @@ app.post("/portal/signup", (req, res) => {
   const node_id = mkNodeId(e);
   db.prepare("INSERT INTO users(email,pass_hash,token,node_id,created) VALUES(?,?,?,?,?)")
     .run(e, hashPass(password), token, node_id, Date.now());
+  db.prepare("INSERT INTO user_keys(email, token, label, created) VALUES(?,?,?,?)")
+    .run(e, token, "primary", Date.now());
   res.json({ ok: true, email: e, api_token: token, node_id });
 });
 
@@ -292,6 +316,36 @@ app.get("/portal/me", (req, res) => {
   if (!u) return res.status(401).json({ ok: false, error: "invalid token" });
   const led = db.prepare("SELECT * FROM ledger WHERE node_id=? ORDER BY id DESC LIMIT 20").all(u.node_id);
   res.json({ ok: true, email: u.email, node_id: u.node_id, balance: creditBalance(u.node_id), journal: led });
+});
+
+app.get("/portal/keys", (req, res) => {
+  const t = req.get("x-swarm-token");
+  const u = findUserByToken(t);
+  if (!u) return res.status(401).json({ ok: false, error: "invalid token" });
+  res.json({ ok: true, email: u.email, keys: listKeysByToken(t).map(k => ({ token: k.token, label: k.label, created: k.created })) });
+});
+
+app.post("/portal/keys/create", (req, res) => {
+  const t = req.get("x-swarm-token");
+  const u = findUserByToken(t);
+  if (!u) return res.status(401).json({ ok: false, error: "invalid token" });
+  const label = String((req.body || {}).label || "key").slice(0, 40);
+  const ntok = mkToken();
+  db.prepare("INSERT INTO user_keys(email, token, label, created) VALUES(?,?,?,?)").run(u.email, ntok, label, Date.now());
+  res.json({ ok: true, token: ntok, label });
+});
+
+app.post("/portal/keys/revoke", (req, res) => {
+  const t = req.get("x-swarm-token");
+  const u = findUserByToken(t);
+  if (!u) return res.status(401).json({ ok: false, error: "invalid token" });
+  const victim = String((req.body || {}).token || "");
+  const mine = listKeysByToken(t);
+  if (!victim || mine.length < 2) return res.status(400).json({ ok: false, error: "至少留一條 key（或未指定）" });
+  const isMine = mine.some(k => k.token === victim);
+  if (!isMine) return res.status(403).json({ ok: false, error: "唔係你嘅 key" });
+  db.prepare("DELETE FROM user_keys WHERE token=? AND email=?").run(victim, u.email);
+  res.json({ ok: true, remaining: mine.length - 1 });
 });
 
 app.get("/portal", (_, res) => {
