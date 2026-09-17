@@ -1,0 +1,35 @@
+# 🤖 SwarmAI Telegram 自動客服
+
+Long-poll Telegram bot，無需 framework（stdlib + requests）。FAQ 自動回、可查餘額/狀態、升級真人。
+
+## 命令
+| Command / 關鍵字 | 做咩 |
+|---|---|
+| /start /help /faq | 功能表 |
+| 開戶 / 註冊 / account | Portal 開戶步驟 |
+| 安裝 / install / docker | Worker 安裝（含 --pull） |
+| token / api key | Token 點攞/點填 |
+| 點數 / swai / balance | 點數機制 ＋ /balance <client-xxx> |
+| 使用 / 落單 / task / use | API 落單例 |
+| 狀態 / status | Swarm 網絡狀態（live /nodes） |
+| 私隱 / 沙盒 / privacy | 私隱/沙盒說明 |
+| /human / 人工 | 轉真人＋通知 admin chat |
+| 其他 | keyword 分唔到 → 升級真人 |
+
+## 部署
+- 檔：`agent-core/swarm_support_bot.py`（main node）
+- Task：Windows `swarm-support-bot`（/sc onstart）+ 可手動 `setsid python3 -u ... &`
+- log：`/mnt/d/node-log/swarm-support-bot.log`
+- 用 router 真實狀態：`swarm-monitor.env` 入面 `SWARM_ROUTER_TOKEN`（monitor 有）
+
+## 專屬 bot token（建議）
+而家 fallback 用 `.docker-watchdog.env` 嘅 `TELEGRAM_BOT_TOKEN`（opencode bot）。**建議用 BotFather 開一個專屬 bot**：
+1. Telegram 開 @BotFather → /newbot → 抄個 token
+2. 入 `swarm-support-bot.env`：
+   ```
+   SWARM_SUPPORT_BOT_TOKEN=<new token>
+   SWARM_ADMIN_CHAT=<admin chat id>
+   ```
+3. 重啟 bot（kill 舊 process + re-launch）
+
+> ⚠️ 同一個 bot token 唔可以同時俾多個 long-poll；如果 opencode-telegram 都有 poll 緊同一 token 就會 409。
