@@ -10,7 +10,7 @@
 
 SwarmAI 係一個**跨時區嘅去中心化 AI 算力網絡**：
 
-- **瞓覺就賺** — 喺你當地深夜/空閒時間，你部機開放 GPU 入網（可設 00:00–07:00 或手動切換），按 **Proof-of-Uptime** 賺 **Time-Bank Credit 點數**。
+- **瞓覺就賺** — 喺你當地深夜/空閒時間，你部機開放 GPU 入網（可設 00:00–07:00 或手動切換），按 **Proof-of-Uptime** 賺 **SWAI token 單位**（off-chain 分帳）。
 - **醒來超強** — 日頭你需要大量 AI 任務時，呼叫其他時區正喺「瞓覺掛機」嘅 GPU。
 - **群體升級 Qwythos** — 同一問題分俾多個節點並行推理，加權投票：實測 **direct 50% → swarm 100%**（單一模型錯嘅題俾投票救返）。
 - **私隱唔出街** — 遠端任務只喺沙盒入面行（讀唔到你部機）；Notebook 私密數據由本地過濾器遮罩先出網。
@@ -101,9 +101,9 @@ bash sandbox/run-worker.sh my-gpu-1 "reasoning math code"
 ## 4. 用 AI — 點解扣點數
 
 - **自己機優先（免費）**：用自己部機唔扣點。
-- **借其他時區 idle 機**：按 GPU-min 計，扣 Time-Bank Credit。
+- **借其他時區 idle 機**：按 GPU-min 計，扣 SWAI token。
 - **賺**：你上線/瞓覺時間累積 Credit（Proof-of-Uptime）；完成任務回傳投票都會 mint 少少。
-- 而家係輕量 Credit 賬本（SQLite）；token 化係日後方向。
+- 而家係 off-chain SWAI 分帳（SQLite）；on-chain 係日後方向（見 TOKENOMICS.md）。
 
 Router API：
 ```bash

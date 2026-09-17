@@ -57,9 +57,14 @@ MILESTONES.md（cluster tracker）+ 本 ROADMAP。
 - SESSION_MEMORY + MILESTONES.md 更新
 - `git commit`（Big Pickle）＋ `git push origin master`
 
+### M8 ✅ SWAI Token 策略定案（off-chain 分帳 + tokenomics doc）— done 2026-09-17
+- SWAI token 單位作貢獻/扣費點；**唔上鏈住**（batch/checkpoint 為未來 on-chain 路線）
+- `docs/TOKENOMICS.md`（mint/burn 規則、供應通脹建議、on-chain 遷移）
+- 口徑：網頁/README 由「點數 Credit」改為「SWAI token（off-chain 分帳）」
+
 ## Out of scope / Later
 - libp2p / NAT punch（Phase 3）
-- Token / blockchain ledger（Time-Bank 穩定之後先諗）
+- ~~Token ledger~~ → SWAI token（M8 定案：off-chain，on-chain 排期）
 - WASM sandbox（先 Docker）
 - Federated fine-tune / speculative decoding over WAN（research，未排期）
 
