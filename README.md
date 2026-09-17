@@ -3,6 +3,8 @@
 Decentralized AI compute network. **"Sleep — share your GPU; wake up — the whole network works for you."**
 Cross-timezone, asynchronous compute sharing for home GPUs. MIT · [swarmai.club](https://swarmai.club) · GitHub: `SwarmAI-Club/swarm-orch`
 
+👉 **Customer quick-start (join / run your own swarm): [docs/START_HERE.md](docs/START_HERE.md)**
+
 ## North Star
 
 Home users lend their GPU during their local night / idle hours (Proof-of-Uptime, earning **Time-Bank credits**).
