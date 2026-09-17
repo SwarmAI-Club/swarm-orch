@@ -1,56 +1,89 @@
 # SwarmAI — swarm-orch
 
-去中心化 AI 算力網絡嘅 orchestration layer。**Node router + Python worker** 混合架構，借 Symphony (GradientHQ, arXiv:2508.20019) 嘅 beacon routing + capability matching + weighted CoT voting 概念，自家實作。
+Decentralized AI compute network. **"Sleep — share your GPU; wake up — the whole network works for you."**
+Cross-timezone, asynchronous compute sharing for home GPUs. MIT · [swarmai.club](https://swarmai.club) · GitHub: `SwarmAI-Club/swarm-orch`
 
-## 協議（5 種 JSON messages）
+## North Star
 
-`protocol/messages.json` — `node_register` / `beacon` / `beacon_response` / `task_assign` / `task_result`
+Home users lend their GPU during their local night / idle hours (Proof-of-Uptime, earning **Time-Bank credits**).
+When they need heavy AI work during their day, they call on GPUs of users currently sleeping in other time zones — a "reverse sundial" of idle compute. Open, auditable, decentralized — no big-tech data center required.
 
-Transport Phase 1 = HTTP over Tailscale mesh（100.x），協議層已抽象可換 libp2p/MQ。
-
-## 架構
+## Architecture
 
 ```
-Worker (Python, llama-server /completion)
-   │ node_register
-   ▼
-Router (Node) ── beacon ──► multiple workers
-   ◄──────────────────────── beacon_response (confidence)
-   ▼
-   task_assign ──► worker(s) ──► task_result (votes[])
-   ▼
-   weighted majority voting → final answer
+Notebook (local, private) ── privacy filter ──┐
+                                             ▼
+          Router (Node)  :4900   ──  Time-Bank credit ledger (SQLite)
+           │  beacon / node_status
+           ▼
+    Worker (Python, llama-server /completion)      ← optional Docker sandbox
+           │  task_result (votes[])
+           ▼
+    weighted majority voting → final answer
 ```
 
-## 快速開始
+- **方案 B (multi-agent task dispatch)** over Layer-sharding: home WAN latency/bandwidth favor dispatching whole tasks that run locally and return results.
+- **Transport Phase 1** = HTTP over Tailscale mesh (`100.x`). Protocol layer is abstracted for a future libp2p / NAT-hole-punching transport (Phase 3) for external home users.
+
+## Components
+
+| Path | What |
+|------|------|
+| `router/router.js` | Node orchestrator: registry, capability matching (Jaccard), beacon/assign/vote, **Time-Bank SQLite credit ledger** (`data/ledger.db`), `/status` heartbeat |
+| `worker-node/worker.py` | Python worker: `node_register`, serves `/health` `/beacon` `/assign`, runs llama-server `/completion` CoT votes, posts `task_result`, optional heartbeat |
+| `agent/swarm_agent.py` | Client daemon ("first DNA"): timezone sleep-window detection, manual Share Mode (`auto|on|off`), `node_register` + periodic `node_status`; `--mock` for no-GPU testing |
+| `sandbox/` | **Zero-Knowledge sandbox v1**: Docker image (GPU-only, read-only FS, no host mounts) + `run-worker.sh` |
+| `notebook/` | Privacy filter (`regex` + custom terms masking) + MCP-style (JSON-RPC stdio) router bridge |
+| `benchmarks/` | `swarm_demo.py` direct-vs-swarm scoring; `fetch_bbh.py`/`fetch_amc.py` Symphony-style set |
+
+## Protocol (`protocol/messages.json`)
+
+`node_register` · `beacon` · `beacon_response` · `task_assign` · `task_result` · `node_status` (v0.2) · `credit_mint` · `credit_burn`
+
+## Security (Zero-Knowledge Sandbox)
+
+Remote tasks run inside a container that can only reach the router/completion endpoints — **no host filesystem, no local network**. Phase 2 target: WASM. Combined with the Notebook privacy filter, private data never leaves your machine.
+
+## Benchmarks
+
+Live run (2026-09-17, 3× Qwythos 9B nodes — main :8087, rtx2080ti :8087, rtx3060 :8080):
+BBH-lite 6-question reasoning, **direct 50% (3/6) → swarm weighted-voting 67% (4/6)** — one question the single model got wrong was corrected by the swarm vote.
+`benchmarks/results/*.json`. (Full BBH/AMC sets: `fetch_bbh.py` / `fetch_amc.py`.)
+
+## Quick start
 
 ```bash
-# router (main node)
+# Router (main node)
 npm install
-npm run router            # :4900
+SWARM_ROUTER_PORT=4900 node router/router.js      # :4900, ledger in data/ledger.db
 
-# worker (each GPU node)
+# Worker (each GPU node)
 python3 worker-node/worker.py \
   --router http://100.70.76.100:4900 \
   --node-id rtx2080ti \
-  --completion http://100.106.211.51:8085/completion \
-  --capabilities reasoning math analysis code
+  --completion http://100.106.211.51:8087/completion \
+  --capabilities reasoning math analysis code \
+  --heartbeat 30
+
+# Client agent (sleep-window sharing) — works without a GPU (--mock)
+python3 agent/swarm_agent.py --config agent/agent.json --router http://100.70.76.100:4900 --mock --heartbeat 30
+
+# Sandbox worker (Docker)
+SWARM_COMPLETION=http://100.106.211.51:8087/completion bash sandbox/run-worker.sh rtx2080ti "reasoning math code"
 ```
 
-## Benchmark（Phase 1 PoC）
-
-對比直解 vs Swarm voting：
-- **BBH** (Big-Bench Hard) — Symphony paper: Qwen2.5-7B direct 73.19% → Symphony 86.23%
-- **AMC** — direct 16.87% → 25.30%
+## Tests
 
 ```bash
-python3 benchmarks/fetch_bbh.py        # fetch + cache subset
-python3 benchmarks/fetch_amc.py
+python3 agent/smoke_test.py      # agent register + heartbeat
+node router/ledger_test.js       # Time-Bank mint/burn/vote-mint
+python3 benchmarks/swarm_demo.py # direct vs swarm accuracy
 ```
 
-## Design notes
-- **Capability matching**: Jaccard (∩/∪) 第一階段；Phase 2 上 LinUCB bandit routing
-- **Voting**: weighted majority `Σ(confidence_i × I(a_i=a))`
-- **唔改動現有 agent-core**（production trading），獨立包
+## Roadmap & Milestones
 
-MIT License · 詳情：swarmai.club
+See [ROADMAP.md](ROADMAP.md). M0–M6 done (protocol v0.2, agent daemon, credit ledger, sandbox, 3×Qwythos demo, notebook/privacy+MCP). Outstanding: rtx2060a worker online · libp2p transport · WASM sandbox · federated fine-tune (research).
+
+## License
+
+MIT. Free for all — use it, audit it, run your own swarm.

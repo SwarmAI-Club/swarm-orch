@@ -19,39 +19,39 @@
 ### M0 ✅ 里程碑基建 — done 2026-09-17
 MILESTONES.md（cluster tracker）+ 本 ROADMAP。
 
-### M1 — Protocol v0.2（`node_status` heartbeat）
+### M1 ✅ Protocol v0.2（`node_status` heartbeat）— done 2026-09-17
 - `protocol/messages.json` 加 `node_status`：
   - fields: `type="node_status"`, `node_id`, `status` (IDLE_SHARING | USER_OCCUPIED), `vram_used_gb`, `model_loaded`, `load`, `sleeping` (bool), `ts`
 - backward compatible（唔郁 5 種舊 message）
 
-### M2 — `swarm-agent` 客戶端守護進程
+### M2 ✅ `swarm-agent` 客戶端守護進程 — done 2026-09-17
 - `agent/swarm_agent.py`：本地時區/睡眠窗口設定（JSON config）、手動 Share Mode、
   上線 `node_register` + 定期 `node_status` heartbeat（loop 可設定，default 60s）
 - `--mock` mode：唔使真 GPU/ollama 都跑到嚟驗證
 - `worker-node/worker.py` 擴充 heartbeat 輸出版（agent 同 worker 共用邏輯）
 
-### M3 — Time-Bank Credit Ledger (SQLite)
+### M3 ✅ Time-Bank Credit Ledger (SQLite) — done 2026-09-17
 - Router 起 `ledger.db`（`nodes` + `ledger` table）
 - Endpoints：`POST /ledger/mint`（provider 賺，按 GPU-min）、`POST /ledger/burn`（requester 扣）、`GET /credits/:node`、`GET /ledger/latest`
 - `POST /vote` 完成時自動 mint（用 `duration_ms` 折算 credit）
 
-### M4 — Docker Sandbox (信任閘門)
+### M4 ✅ Docker Sandbox (信任閘門) — done 2026-09-17
 - `sandbox/Dockerfile`：python + requests，**無 host FS mount**、淨係 network 接 router
 - `sandbox/run-worker.sh`：起 container worker，環境變數傳 router/completion/capabilities
 - 目標：remote 任務只能 call `/completion`，接觸唔到本機檔案系統
 
-### M5 — Swarm-Reasoning Demo（3× Qwythos）
+### M5 ✅ Swarm-Reasoning Demo（3× Qwythos）— done 2026-09-17: BBH-lite 6Q direct 50% → swarm 67%
 - live nodes（2026-09-17 校準）：main `100.70.76.100:8087`（qwythos-1m-main）、
   rtx2080ti `100.106.211.51:8087`（qwythos-1m，**nodes.json port 修正 8085→8087**）、
   rtx3060 `100.97.2.13:8080`（qwythos-1m）
 - BBH subset：direct（單 node）vs swarm weighted voting → `benchmarks/results/`
 - 賣點：「瞓覺幫你升級 Qwythos」— 多 node 投票逼近大模型邏輯水平
 
-### M6 — Notebook Privacy Filter
+### M6 ✅ Notebook Privacy Filter — done 2026-09-17
 - `notebook/privacy_filter.py`：Regex + 自訂 redaction list 遮罩 email/電話/人名/路徑/金額先出網
 - `notebook/mcp_server.py`：MCP（stdio）stub，將 router 嘅 task 工具暴露俾 Notebook 前端
 
-### M7 — Docs / Website / Memory / GitHub sync
+### M7 ✅ Docs / Website / Memory / GitHub sync — done 2026-09-17
 - README（EN，OSS-ready）＋ 本 Roadmap 更新
 - swarmai.club landing 加 Milestones 段
 - SESSION_MEMORY + MILESTONES.md 更新
