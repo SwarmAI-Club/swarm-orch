@@ -1,5 +1,5 @@
 {
-  "max_beacon_targets": 3,
+  "max_beacon_targets": 5,
   "nodes": [
     {
       "node_id": "main",
@@ -31,19 +31,6 @@
       ]
     },
     {
-      "node_id": "rtx2060a",
-      "url": "http://100.115.169.51:8080",
-      "model": "Gemma4-12B",
-      "gpu": "2060 12GB",
-      "max_context": 8192,
-      "speed": "27.4 t/s",
-      "capabilities": [
-        "reasoning",
-        "math",
-        "analysis"
-      ]
-    },
-    {
       "node_id": "rtx3060",
       "url": "http://100.97.2.13:8080",
       "model": "Qwythos-1M-9B",
@@ -55,6 +42,32 @@
         "math",
         "analysis",
         "vision"
+      ]
+    },
+    {
+      "node_id": "rtx2060a",
+      "url": "http://100.97.18.72:8087",
+      "model": "qwythos-1m",
+      "gpu": "2060 12GB",
+      "max_context": 32768,
+      "speed": "",
+      "capabilities": [
+        "reasoning",
+        "math",
+        "analysis"
+      ]
+    },
+    {
+      "node_id": "rtx2060b",
+      "url": "http://100.89.139.66:8087",
+      "model": "qwythos-1m",
+      "gpu": "2060 12GB",
+      "max_context": 32768,
+      "speed": "",
+      "capabilities": [
+        "reasoning",
+        "math",
+        "analysis"
       ]
     }
   ]
