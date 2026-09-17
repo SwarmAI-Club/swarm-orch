@@ -53,6 +53,7 @@ app.use(express.json());
 
 const registry = new Map();       // node_id -> capabilities/model/gpu/url
 const pendingBeacons = new Map(); // beacon_id -> {required, responses:[]}
+const resultsStore = new Map();   // task_id -> task_result[]
 
 function jaccard(a, b) {
   if (!a.length || !b.length) return 0;
@@ -108,10 +109,20 @@ app.post("/beacon", async (req, res) => {
   res.json({ beacon_id, responses });
 });
 
+app.post("/result", (req, res) => {
+  const { task_id, node_id, votes, duration_ms } = req.body || {};
+  if (!task_id || !node_id) return res.status(400).json({ ok: false, error: "task_id&node_id required" });
+  const list = resultsStore.get(task_id) || [];
+  list.push({ node_id, votes: votes || [], duration_ms: duration_ms || 0 });
+  resultsStore.set(task_id, list);
+  res.json({ ok: true, task_id, results: list.length });
+});
+
 app.post("/vote", async (req, res) => {
-  // aggregate existing task_results into weighted majority vote
+  // aggregate task_results into weighted majority vote (reads stored /result entries)
   pendingBeacons.delete(req.body.beacon_id);
-  const results = req.body.results || [];
+  const taskId = req.body.task_id;
+  const results = (taskId && resultsStore.get(taskId)) || req.body.results || [];
   const tally = {};
   for (const r of results) for (const v of r.votes || []) {
     const ans = String(v.content).trim();
