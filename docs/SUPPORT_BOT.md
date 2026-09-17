@@ -11,7 +11,7 @@ Long-poll Telegram bot，無需 framework（stdlib + requests）。FAQ 自動回
 | token / api key | Token 點攞/點填 |
 | 點數 / swai / balance | 點數機制 ＋ `私隱`：`/balance <你嘅API token>` 只睇自己；admin（SWARM_ADMIN_CHAT）先可任查 `/balance <node>` |
 | 使用 / 落單 / task / use | API 落單例 |
-| 狀態 / status | high-level 概要：幾多部機 active／瞓覺（**唔出 node 名**，全部人都係） |
+| 狀態 / status | 只係「幾多部機 active」（冇 node 名、冇其他數字，全部人都係） |
 | 私隱 / 沙盒 / privacy | 私隱/沙盒說明 |
 | /human / 人工 | 轉真人＋通知 admin chat |
 | 其他 | keyword 分唔到 → 升級真人 |
