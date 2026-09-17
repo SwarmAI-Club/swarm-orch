@@ -52,6 +52,14 @@ Live run (2026-09-17, **5× Qwythos 9B nodes** — main :8087, rtx2080ti :8087, 
 BBH-lite 6-question reasoning, **direct 50% (3/6) → swarm weighted-voting 100% (6/6)** — every question the single model got wrong was corrected by the swarm vote.
 `benchmarks/results/*.json`. (Full BBH/AMC sets: `fetch_bbh.py` / `fetch_amc.py`.)
 
+## Public join (no Tailscale needed)
+
+External clients/web users bypass Tailscale entirely — everything goes through the public gateway:
+
+- **Portal**: https://swarmai.club/portal/ → signup/login → get your own API token (SWAI balance shown)
+- **Router API over public HTTPS**: `https://swarmai.club/swarm/...` (e.g. `/swarm/nodes`, `/swarm/register`) with `X-Swarm-Token`
+- Clients point worker/agent at `--router https://swarmai.club/swarm/` — no VPN, unlimited users (Cloudflare in front; your identity = email).
+
 ## Quick start
 
 ```bash

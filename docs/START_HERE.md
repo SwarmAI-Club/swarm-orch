@@ -37,6 +37,10 @@ SwarmAI 係一個**跨時區嘅去中心化 AI 算力網絡**：
 
 ### 3a. 第一步：攞 API token（入網證明）
 
+- **公開入口（唔使 VPN/Tailscale）**：開 `https://swarmai.club/portal/` → Sign up（email + password）→ 即攞你嘅 API token + node_id。
+- 登入後頁面會顯示你嘅 **SWAI 點數** 同分錄。
+- Worker/Agent 之後指去 `--router https://swarmai.club/swarm/`（帶 `X-Swarm-Token`）就得，任何數量用戶都 OK（Cloudflare front）。
+
 - **你嘅 token** = `X-Swarm-Token` header，Router 啟動用 `SWARM_API_TOKEN` 設定。
 - 我哋/買 key：email `support@swarmai.club`（或自架指定）。
 - 冇 token 一律 `401`。

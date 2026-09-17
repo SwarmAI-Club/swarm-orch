@@ -72,7 +72,7 @@ app.use(express.json());
 // ---- Auth: all endpoints require X-Swarm-Token ----
 app.use((req, res, next) => {
   const p0 = req.path;
-  if (p0 === "/portal" || p0.startsWith("/portal/login") || p0.startsWith("/portal/signup")) return next();
+  if (p0.startsWith("/portal")) return next();
   const t = req.get("x-swarm-token");
   if (t !== NET_TOKEN && !findUserByToken(t)) return res.status(401).json({ ok: false, error: "invalid x-swarm-token" });
   next();
