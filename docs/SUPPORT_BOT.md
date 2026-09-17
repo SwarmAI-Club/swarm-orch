@@ -13,7 +13,8 @@ Long-poll Telegram bot，無需 framework（stdlib + requests）。FAQ 自動回
 | 使用 / 落單 / task / use | API 落單例 |
 | 狀態 / status | 只係「幾多部機 active」（冇 node 名、冇其他數字，全部人都係） |
 | 私隱 / 沙盒 / privacy | 正常回全段（公眾都答） |
-| /human / 人工 | 轉真人＋通知 admin chat |
+| /human / 人工 | ⏳ 先話『de請稍候』→ 等 5 秒（真人可用 `/reply <chat> <text>` 接手）→ 冇人接先出『下線留 ticket』 |
+| /reply (admin) | `/reply <chat_id> <text>` — 真人直接代回覆，並取消該客嘅下線提示 |
 | 其他 | keyword 分唔到 → 升級真人 |
 | 撳 inline button / callback | ✅ 而家都處理（callback_query 當指令） |
 
