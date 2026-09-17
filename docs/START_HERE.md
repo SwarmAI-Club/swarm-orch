@@ -42,7 +42,7 @@ git clone https://github.com/SwarmAI-Club/swarm-orch.git
 cd swarm-orch
 npm install
 SWARM_ROUTER_PORT=4900 node router/router.js
-# → http://:4900，Time-Bank ledger 喺 data/ledger.db
+# → http://:4900，SWAI token ledger 喺 data/ledger.db (off-chain)
 ```
 
 ### 3b. Worker（每部 GPU 節點 — 收任務 / 跑推理 / 回傳 votes）
