@@ -13,10 +13,11 @@ const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "swarm-ledgertest-"));
 function req(method, url, body) {
   return new Promise((resolve, reject) => {
     const data = body ? JSON.stringify(body) : null;
-    const r = http.request(`${BASE}${url}`, { method, headers: data ? { "content-type": "application/json" } : {} }, (res) => {
+    const hdrs = data ? { "content-type": "application/json", "x-swarm-token": "test-token" } : { "x-swarm-token": "test-token" };
+    const r = http.request(`${BASE}${url}`, { method, headers: hdrs }, (res) => {
       let s = "";
       res.on("data", (c) => (s += c));
-      res.on("end", () => { try { resolve(JSON.parse(s)); } catch (e) { reject(e); } });
+      res.on("end", () => { try { resolve(JSON.parse(s)); } catch (e) { reject(new Error("CDATA "+url+" -> "+s.slice(0,140))); } });
     });
     r.on("error", reject);
     if (data) r.write(data);
@@ -34,7 +35,7 @@ async function waitReady(t = 15) {
 
 (async () => {
   const child = spawn(process.execPath, [ROUTER], {
-    env: { ...process.env, SWARM_ROUTER_PORT: String(PORT), SWARM_CREDIT_RATE_PM: "10", SWARM_DATA_DIR: DATA_DIR },
+    env: { ...process.env, SWARM_ROUTER_PORT: String(PORT), SWARM_CREDIT_RATE_PM: "10", SWARM_DATA_DIR: DATA_DIR, SWARM_API_TOKEN: "test-token" },
     stdio: "ignore",
   });
   try {

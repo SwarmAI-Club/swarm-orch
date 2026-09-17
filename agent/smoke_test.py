@@ -20,7 +20,7 @@ def wait_ready(timeout=15):
     t0 = time.time()
     while time.time() - t0 < timeout:
         try:
-            r = requests.get(BASE + "/nodes", timeout=1)
+            r = requests.get(BASE + "/nodes", headers={"x-swarm-token":"test-token"}, timeout=1)
             if r.status_code == 200:
                 return True
         except Exception:
@@ -32,6 +32,7 @@ def wait_ready(timeout=15):
 def main():
     env = dict(os.environ)
     env["SWARM_ROUTER_PORT"] = str(PORT)
+    env["SWARM_API_TOKEN"] = "test-token"
     proc = subprocess.Popen(
         ["node", ROUTER_JS],
         cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -48,6 +49,7 @@ def main():
         with open(CONFIG_JSON, encoding="utf-8") as f:
             cfg = json.load(f)
         cfg["node_id"] = "smoke-1"
+        cfg["token"] = "test-token"
 
         reg = A.register(cfg, BASE)
         print("OK  register   nodes:", reg.get("nodes"))
@@ -56,11 +58,11 @@ def main():
         sleep_p = A.node_status_payload({**cfg, "sleep_start_hour": 0, "sleep_end_hour": 23}, True)
         awake_p = A.node_status_payload({**cfg, "sleep_start_hour": 0, "sleep_end_hour": 23}, False)
         for pl in (sleep_p, awake_p):
-            r = requests.post(BASE + "/status", json=pl, timeout=5)
+            r = requests.post(BASE + "/status", json=pl, headers={"x-swarm-token":"test-token"}, timeout=5)
             if r.status_code != 200 or not r.json().get("ok"):
                 print("FAIL status", r.text, file=sys.stderr)
                 return 1
-        nodes = requests.get(BASE + "/nodes", timeout=5).json()
+        nodes = requests.get(BASE + "/nodes", headers={"x-swarm-token":"test-token"}, timeout=5).json()
         mine = next((n for n in nodes if n.get("node_id") == "smoke-1"), None)
         if not mine or "last_status" not in mine:
             print("FAIL: 搵唔到 smoke-1 嘅 last_status", json.dumps(nodes), file=sys.stderr)
