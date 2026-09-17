@@ -35,7 +35,13 @@ SwarmAI 係一個**跨時區嘅去中心化 AI 算力網絡**：
 
 ## 3. 快速開始（自己起一個 swarm / 或者做一個 node）
 
-### 3a. Router（主節點，起中樞）
+### 3a. 第一步：攞 API token（入網證明）
+
+- **你嘅 token** = `X-Swarm-Token` header，Router 啟動用 `SWARM_API_TOKEN` 設定。
+- 我哋/買 key：email `support@swarmai.club`（或自架指定）。
+- 冇 token 一律 `401`。
+
+### 3b. Router（主節點，起中樞）
 
 ```bash
 git clone https://github.com/SwarmAI-Club/swarm-orch.git
@@ -49,7 +55,7 @@ SWARM_ROUTER_PORT=4900 node router/router.js
 
 ```bash
 python3 worker-node/worker.py \
-  --router http://<ROUTER_IP>:4900 \
+  --router http://<ROUTER_IP>:4900 --token "$SWARM_API_TOKEN" \
   --node-id my-gpu-1 \
   --completion http://127.0.0.1:<llama-server-port>/completion \
   --model qwythos-1m --gpu "RTX 4080 16GB" --vram 16 \
@@ -68,7 +74,7 @@ python3 worker-node/worker.py \
 ### 3d. 「瞓覺就賺」agent（守護進程，設睡眠窗口 + 手動 Share Mode）
 
 ```bash
-python3 agent/swarm_agent.py --config agent/agent.json \
+SWARM_API_TOKEN="$SWARM_API_TOKEN" python3 agent/swarm_agent.py --config agent/agent.json \
   --router http://<ROUTER_IP>:4900 --heartbeat 30
 ```
 `agent/agent.json` 入面：
@@ -86,7 +92,7 @@ python3 agent/swarm_agent.py --config agent/agent.json \
 ```
 - `share_mode`：`auto`=跟睡眠窗口 · `on`=永遠共享 · `off`=永遠唔共享（完全控制權喺你手）
 
-### 3e. Docker 沙盒 worker（安全示範入口）
+### 3f. Docker 沙盒 worker（安全示範入口）
 
 ```bash
 docker build -f sandbox/Dockerfile -t swarm-worker .   # 喺 repo root 行
