@@ -152,6 +152,13 @@ mint mult = 0.75 + rating/100×0.5；派工 sort 乘 rating
   - **Worker adapter 框架**（worker.py）：`--adapter image|video` + `--capabilities image-gen/video-gen`；`on_assign` 見 body `adapter` 就行 `on_adapter()`（唔行 CoT/llm）。內建 `adapter_image()` call SD-WebUI `/sdapi/v1/txt2img`（`SD_API_URL`），每張＝1 unit 回 `images:[data_uri]`；`adapter_video()` 係 Wan stub（`WAN_API_URL` 未實作）。`--completion` 對 adapter 嚟講係 SD/ComfyUI API 址（唔一定 llama-server）。
 - **新增 specialty worker 上手**：`python3 worker-node/worker.py --router https://swarmai.club/swarm --token <T> --node-id sd-1 --capabilities image-gen --adapter image --completion http://127.0.0.1:7860/sdapi/v1 --pull --heartbeat 30`（SD-WebUI 已起）。用 `swarmai-image` model 落單即接到。
 - **計費語義**：text/vision 照 token（`RATE_IN 5000`/`RATE_OUT 1000`）；specialty 照 **units×unitPrice**（每 job 計，唔係 token）。image/video 收費幾貴由 `SWAI_IMAGE_UNIT_PRICE` / `SWAI_VIDEO_UNIT_PRICE` env 控制。
+
+## 10c. 用戶私隱（2026-09-19 起明列保證）
+- **Data minimization（默認唔留）**：任務 prompt / AI 輸出結果**唔寫落任何 DB**（`ledger.db` 只有 users/credits/ledger/node_settings/daily_usage 等營運數據，冇任務內容表）。Router 處理過程用 in-memory `resultsStore`，結算完成後自動清（10min sweep），router restart 即全部消失。
+- **Log 淨係營運 metadata**：router log 只記錄 node_id / model / units / 派工結果，**唔含 prompt / 答案內容**（2026-09-19 審查 + 移除 `[img]` prompt head 洩漏）。worker log 唔含 prompt。
+- **唔賣 / 唔分享**：全 code open，冇任何 analytics/telemetry/第三方 call 發送用戶數據；冇數據留存 = 冇得賣、冇得洩。
+- **帳戶級數據**：email（登入用）+ SWAI 餘額 + node 設定，只喺你自己 account 內可見（/portal/me 用你 token 認返你自己）。password 用 scrypt hash，冇明文。
+- **承諾邊界**：記數（tokens/units/credit）係營運必需，保留；**任務內容係 ephemeral，平台唔保存、唔分析、唔分享**。社群版可喺 bot `/privacy` 顯示呢份保證。
 - **Worker 側原則**：specialty worker 同 router 一律用 `/assign`+`/result`（HMAC 簽名 + assigned-set 防偽）對接，被 adapter 只係「completion 換成圖/視訊 API」。sandbox Dockerfile 加 `--gpus` + 額外依賴即可。
 - **Vision（現有）**：`qwen-vision` 係平台自家 node（rtx2080ti :8089），`swarmai-vision` 自動分流；唔要求一般用戶裝 VL model。若全網冇 vision node 上線，image 請求先會 503 —— 靠平台 keep ≥1 隻 VL 兜底。
 - **節點設定分層（2026-09-19 起）**：user-level（`users` 表）：display_name / pref_model / timezone / sleep 窗口 / share_default / max_budget_per_task；**node-level（`node_settings` 表）**：free / sleep_start_hour / sleep_end_hour / share_ratio / suspend / removed —— node 有設就覆寫 user 預設（`nodeShareOverride` / `nodeSuspended` / `nodeRemoved`），portal `/portal/node_settings` 逐 node 設定。
