@@ -61,3 +61,32 @@
 - 5 node 平均 ~26 tok/s idle 一日 ≈ **~11,000 SWAI/日**。
 - 一次 3-vote task（in 500 out 900）：500/5000 + 900/1000 = 0.1 + 0.9 = **1.0 SWAI**。
 - 一次 2-vote 答「2+3」（上面實測）：in 36 out 128 → 36/5000 + 128/1000 ≈ 0.1+0.1 = 估費 ~1 SWAI，worker mint 每個 +1（實測：4 vote mint 各 +1，task burn 1）。
+---
+
+## 7. 定價 Tier / OpenAI Gateway / Vision / Pilot（2026-09-18 實作）
+
+### 對外 model（OpenAI-compatible）
+`POST /v1/chat/completions`（`Authorization: Bearer <token>`）
+| model | 派去 | 收費 |
+|---|---|---|
+| `swarmai-fast` | tier S/A（5090/4090/2080Ti）| 貴（S×1.8 / A×1.3）|
+| `swarmai-normal` | tier B/C（3060/2060/≤8GB）| 平（B×1.0 / C×0.6）|
+| `swarmai-fast-vision` | qwen2.5-vl（自動，含 base64 image）| 純按 tokens |
+
+- **tier 由 `gpu`/`vram` 判定**：S=5090/4090/≥24G · A=2080Ti/3090/≥20G · B=≥10G · C=其餘
+- **fallback**：fast 冇 S/A → 派 B 但照收 normal 平價
+- **分派**：`matchCapabilities × share_ratio × (快+rating)`
+- `GET /v1/models` 列 model + n_votes/tiers metadata
+
+### 評分 Grade（/portal/me 每 node）
+`speed(50%) + availability(25%) + capacity(15%) + trust(10%)` → 0-100 → S(≥90)/A(≥80)/B(≥65)/C(≥50)/D
+
+### Pilot 優惠
+- `SWARM_SIGNUP_BONUS=50`：開戶即送 50 SWAI（`kind=manual`, note=welcome_bonus）
+- `promotions` 表（discount/mint_boost）；`POST /admin/promo`（admin）建 code；`GET /portal/promos`
+- Portal 頂橫幅顯示試玩 + code
+
+### 安全（P2）
+- `/assign` HMAC 簽名（router `SIGN(task_id::node_id)` 用 `SWARM_ROUTER_SECRET`；worker 驗）→ 直撳 /assign 403
+- `/result` 驗「task 有派過俾呢個 node」（assigned set）→ 防偽造 vote 呃 SWAI
+- `/tasks/poll` 鎖 node 歸屬（token account ≠ node account → 403）
