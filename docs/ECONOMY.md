@@ -69,9 +69,9 @@
 `POST /v1/chat/completions`（`Authorization: Bearer <token>`）
 | model | 派去 | 收費 |
 |---|---|---|
-| `swarmai-fast` | tier S/A（5090/4090/2080Ti）| 貴（S×1.8 / A×1.3）|
+| `swarmai-fast` | tier S/A（5090/4090/2080Ti）+ free node | 貴（S×1.8 / A×1.3）|
 | `swarmai-normal` | tier B/C（3060/2060/≤8GB）| 平（B×1.0 / C×0.6）|
-| `swarmai-fast-vision` | qwen2.5-vl（自動，含 base64 image）| 純按 tokens |
+| `swarmai-vision`（hidden）| qwen2.5-vl（自動分流，含 base64 image）| 純按 tokens |
 
 - **tier 由 `gpu`/`vram` 判定**：S=5090/4090/≥24G · A=2080Ti/3090/≥20G · B=≥10G · C=其餘
 - **fallback**：fast 冇 S/A → 派 B 但照收 normal 平價
@@ -94,7 +94,7 @@
 
 ## 8. Free Node（per-node 免費分享，2026-09-18）
 - worker `--free` 或 portal `/portal/node_toggle`（owner）開關每個 node 嘅 free mode
-- 全 free targets → 要求者**唔 burn**（est_fee=0）；Node owner **照收 mint**（善意分享，付出咗算力）
+- targets 有任一個 free（或 swarmai-free model）→ 要求者**唔 burn**（free_served=true）；Node owner **照收 mint**（善意分享）
 - mixed（有付費 node）→ 照正常收費（保守）
 - `/v1` response 有 `free_served` 標記 + `est_fee`
 - ⚠️ 自由環境有濫用風險；rating guard 部分緩解。揀 node 用 rating。
