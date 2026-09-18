@@ -110,7 +110,7 @@ function accountForToken(t) {
 const MODEL_MAP = {
   "swarmai-fast":     { cap: ["reasoning", "analysis"], tier: ["S", "A"], n_votes: 3, label: "勁機優先（5090/4090/2080Ti），貴" },
   "swarmai-normal":   { cap: ["reasoning", "math"], tier: ["B", "C"], n_votes: 3, label: "日常平價（3060/2060 及以下）" },
-  "swarmai-fast-vision": { cap: ["vision"], tier: ["S", "A", "B", "C"], n_votes: 1, vision: true, hidden: true, label: "Vision (auto-route, 唔對外顯示)" },
+  "swarmai-vision": { cap: ["vision"], tier: ["S", "A", "B", "C"], n_votes: 1, vision: true, hidden: true, label: "Vision (auto-route, 唔對外顯示)" },
   "swarmai-free":     { cap: ["reasoning", "math", "analysis"], tier: ["S", "A", "B", "C"], n_votes: 3, freeOnly: true, label: "免費 node（自由分享）——唔扣費" },
 };
 // tier 收費倍率（需求方）同一緊 mint（供應方）用
@@ -669,7 +669,7 @@ app.post("/v1/chat/completions", async (req, res) => {
       return res.status(400).json({ error: { message: "messages required" }, type: "invalid_request_error" });
     const reqTok = req.get("x-swarm-token") || (req.swarmToken || "");
     const hasImage = detectImageInMessages(messages);
-    const modelKey = hasImage ? "swarmai-fast-vision" : (MODEL_MAP[model] ? model : "swarmai-normal");
+    const modelKey = hasImage ? "swarmai-vision" : (MODEL_MAP[model] ? model : "swarmai-normal");
     const mm = MODEL_MAP[modelKey];
     const prompt = messagesToPrompt(messages);
     const images = hasImage ? extractImagesFromMessages(messages) : [];
