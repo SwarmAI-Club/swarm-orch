@@ -158,6 +158,19 @@ db.exec(`CREATE TABLE IF NOT EXISTS users(
   node_id TEXT NOT NULL,
   created INTEGER
 )`);
+// profile 可更新欄（migration，有一缺一）
+(function migrateUsers() {
+  const cols = db.prepare("PRAGMA table_info(users)").all().map(c => c.name);
+  const adds = [];
+  if (!cols.includes("display_name")) adds.push("display_name TEXT");
+  if (!cols.includes("pref_model")) adds.push("pref_model TEXT DEFAULT 'swarmai-normal'");
+  if (!cols.includes("timezone")) adds.push("timezone TEXT DEFAULT 'UTC'");
+  if (!cols.includes("sleep_start_hour")) adds.push("sleep_start_hour INTEGER DEFAULT 0");
+  if (!cols.includes("sleep_end_hour")) adds.push("sleep_end_hour INTEGER DEFAULT 7");
+  if (!cols.includes("share_default")) adds.push("share_default INTEGER DEFAULT 100");
+  if (!cols.includes("max_budget_per_task")) adds.push("max_budget_per_task INTEGER DEFAULT 0");
+  for (const a of adds) db.exec(`ALTER TABLE users ADD COLUMN ${a}`);
+})();
 db.exec(`CREATE TABLE IF NOT EXISTS user_resets(
   email TEXT,
   code TEXT PRIMARY KEY,
@@ -703,12 +716,33 @@ app.get("/portal/me", (req, res) => {
     tier: nodeTier(n), ctx: n.max_context || 0, model: n.model || "", gpu: n.gpu || "",
     rating: computeRating(n),
   }));
+  const prof = db.prepare("SELECT display_name, pref_model, timezone, sleep_start_hour, sleep_end_hour, share_default, max_budget_per_task FROM users WHERE email=?").get(u.email) || {};
   res.json({
     ok: true, email: u.email, node_id: u.node_id, account: u.email, balance: creditBalance(u.email),
+    profile: prof,
     nodes,
     economy_note: "計法：idle 1 分鐘 mint = (tok/s × 60 × share_ratio%) / 1000 SWAI；投票按實際 in/out tokens（in 5000t/SWAI、out 1000t/SWAI）。share_ratio=100 全產能；越低越少誘獎、派工優先度越低（防蜂擁）。",
     journal: led
   });
+});
+
+// 用戶可更新嘅 profile 欄位
+app.post("/portal/update_profile", (req, res) => {
+  const u = findUserByToken(req.get("x-swarm-token"));
+  if (!u) return res.status(401).json({ ok: false, error: "invalid token" });
+  const b = req.body || {};
+  const fields = {};
+  if (b.display_name !== undefined) fields.display_name = String(b.display_name).slice(0, 40);
+  if (b.pref_model !== undefined && ["swarmai-fast", "swarmai-normal"].includes(b.pref_model)) fields.pref_model = b.pref_model;
+  if (b.timezone !== undefined) fields.timezone = String(b.timezone).slice(0, 40);
+  if (b.sleep_start_hour !== undefined) fields.sleep_start_hour = Math.max(0, Math.min(23, Number(b.sleep_start_hour) || 0));
+  if (b.sleep_end_hour !== undefined) fields.sleep_end_hour = Math.max(0, Math.min(23, Number(b.sleep_end_hour) || 7));
+  if (b.share_default !== undefined) fields.share_default = Math.max(0, Math.min(100, Number(b.share_default) || 100));
+  if (b.max_budget_per_task !== undefined) fields.max_budget_per_task = Math.max(0, Number(b.max_budget_per_task) || 0);
+  if (!Object.keys(fields).length) return res.status(400).json({ ok: false, error: "no fields" });
+  const sets = Object.keys(fields).map(k => `${k}=?`).join(",");
+  db.prepare(`UPDATE users SET ${sets} WHERE email=?`).run(...Object.values(fields), u.email);
+  res.json({ ok: true, profile: fields });
 });
 
 app.post("/portal/forgot", (req, res) => {
@@ -722,11 +756,24 @@ app.post("/portal/forgot", (req, res) => {
     const link = `https://swarmai.club/portal/?code=${code}`;
     if (SMTP.user && SMTP.pass) {
       try {
-        require("child_process").exec(
-          `python3 -c "import smtplib,os,sys; s=smtplib.SMTP_SSL(os.environ['HOST'],os.environ['PORT']); s.login(os.environ['U'],os.environ['P']); m='From: support@swarmai.club\nTo: '+sys.argv[1]+'\nSubject: SwarmAI password reset\n\nReset your password here:\n'+sys.argv[2]; s.sendmail(os.environ['U'],[sys.argv[1]],m.encode()); s.quit()" "${email}" "${link}"`,
-          { env: { ...process.env, HOST: SMTP.host, PORT: String(SMTP.port), U: SMTP.user, P: SMTP.pass }, timeout: 20000 },
-          (err) => { if (err) console.log("[forgot] SMTP send failed:", String(err.message).slice(0, 140)); });
-      } catch (e) { console.log("[forgot] smtp err:", String(e).slice(0,120)); }
+        const { exec } = require("child_process");
+        const py = [
+          "import smtplib,os,sys",
+          "s=smtplib.SMTP_SSL(os.environ['HOST'],os.environ['PORT'],timeout=20)",
+          "s.login(os.environ['U'],os.environ['P'])",
+          `m='From: ${SMTP.user}\\nTo: '+sys.argv[1]+'\\nSubject: SwarmAI password reset\\n\\nReset your password here:\\n'+sys.argv[2]`,
+          "s.sendmail(os.environ['U'],[sys.argv[1]],m.encode())",
+          "s.quit()",
+        ].join(";");
+        exec(`python3 -c "${py}" "${email}" "${link}"`,
+          { env: { ...process.env, HOST: SMTP.host, PORT: String(SMTP.port), U: SMTP.user, P: SMTP.pass }, timeout: 25000 },
+          (err, stdout, stderr) => {
+            if (err) console.log("[forgot] SMTP send failed:", String(stderr || err.message || err).slice(0, 300));
+            else console.log("[forgot] reset link sent to", email);
+          });
+      } catch (e) { console.log("[forgot] smtp err:", String(e).slice(0,200)); }
+    } else {
+      console.log("[forgot] SMTP not configured (SMTP.user/pass missing)");
     }
   }
   // 一律回 ok，防 enum
