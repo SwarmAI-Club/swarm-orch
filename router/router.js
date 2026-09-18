@@ -164,6 +164,28 @@ db.exec(`CREATE TABLE IF NOT EXISTS user_resets(
   created INTEGER,
   used INTEGER DEFAULT 0
 )`);
+// Pilot 優惠：promo 表 + 開戶送分
+db.exec(`CREATE TABLE IF NOT EXISTS promotions(
+  code TEXT PRIMARY KEY,
+  kind TEXT,           -- discount | mint_boost
+  scope TEXT,          -- tier/model/account/all
+  value REAL,
+  valid_from INTEGER,
+  valid_to INTEGER,
+  max_uses INTEGER,
+  used INTEGER DEFAULT 0
+)`);
+const SIGNUP_BONUS = Number(process.env.SWARM_SIGNUP_BONUS || 50); // Pilot: 開戶送分
+function promoValid(code) {
+  if (!code) return null;
+  const row = db.prepare("SELECT * FROM promotions WHERE code=?").get(String(code));
+  if (!row) return null;
+  const now = Date.now();
+  if (row.valid_from && now < row.valid_from) return null;
+  if (row.valid_to && now > row.valid_to) return null;
+  if (row.max_uses && row.used >= row.max_uses) return null;
+  return row;
+}
 db.exec(`CREATE TABLE IF NOT EXISTS user_keys(
   email TEXT NOT NULL,
   token TEXT PRIMARY KEY,
@@ -654,7 +676,11 @@ app.post("/portal/signup", (req, res) => {
     .run(e, hashPass(password), token, node_id, Date.now());
   db.prepare("INSERT INTO user_keys(email, token, label, created) VALUES(?,?,?,?)")
     .run(e, token, "primary", Date.now());
-  res.json({ ok: true, email: e, api_token: token, node_id });
+  // Pilot 開戶送分（試玩額）
+  if (SIGNUP_BONUS > 0) {
+    ledgerMint(e, { tokensIn: 0, tokensOut: SIGNUP_BONUS * RATE_OUT, taskId: null, note: "welcome_bonus", nodeId: node_id, kind: "manual" });
+  }
+  res.json({ ok: true, email: e, api_token: token, node_id, welcome_bonus: SIGNUP_BONUS });
 });
 
 app.post("/portal/login", (req, res) => {
@@ -754,6 +780,21 @@ app.post("/portal/keys/revoke", (req, res) => {
 app.get("/portal", (_, res) => {
   const html = fs.readFileSync(path.join(__dirname, "portal.html"));
   res.type("html").send(html);
+});
+
+// ---- Pilot promo ----
+app.get("/portal/promos", (req, res) => {
+  const rows = db.prepare("SELECT code, kind, scope, value, valid_from, valid_to FROM promotions WHERE valid_to IS NULL OR valid_to > ?").all(Date.now());
+  res.json({ ok: true, promos: rows, signup_bonus: SIGNUP_BONUS });
+});
+app.post("/admin/promo", (req, res) => {
+  const t = req.get("x-swarm-token");
+  if (t !== NET_TOKEN) return res.status(403).json({ ok: false, error: "admin only" });
+  const { code, kind, scope, value, valid_from, valid_to, max_uses } = req.body || {};
+  if (!code) return res.status(400).json({ ok: false, error: "code required" });
+  db.prepare("INSERT INTO promotions(code,kind,scope,value,valid_from,valid_to,max_uses) VALUES(?,?,?,?,?,?,?)")
+    .run(String(code), kind || "discount", scope || "all", Number(value || 1), valid_from || Date.now(), valid_to || null, Number(max_uses || 0));
+  res.json({ ok: true, code });
 });
 
 
