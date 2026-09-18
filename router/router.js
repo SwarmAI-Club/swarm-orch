@@ -829,6 +829,7 @@ app.post("/portal/keys/revoke", (req, res) => {
 
 app.get("/portal", (_, res) => {
   const html = fs.readFileSync(path.join(__dirname, "portal.html"));
+  res.set("Cache-Control", "no-cache, no-store, must-revalidate");
   res.type("html").send(html);
 });
 
