@@ -991,7 +991,7 @@ app.post("/v1/images/generations", async (req, res) => {
     let freeServed = false;
     // 派工：只揀有 image-gen cap 嘅 node
     let candidates = [...registry.values()].filter(n => n.account && (n.capabilities || []).includes("image-gen"));
-    console.log(`[img] model=${model} units=${units} prompt="${prompt.slice(0,40)}" cand=${candidates.map(c=>c.node_id).join(",")}`);
+    console.log(`[img] model=${model} units=${units} cand=${candidates.map(c=>c.node_id).join(",")}`);
     // free node 只係可選 bonus；唔做 freeOnly——image 要收費（成本唔細）
     if (!candidates.length) return res.status(503).json({ error: { message: "no image worker available（未有 image-gen node）", type: "server_error" } });
     const sorted = matchCapabilities(mm.cap, candidates).sort((a,b) => b.score - a.score);
