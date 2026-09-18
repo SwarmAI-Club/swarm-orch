@@ -20,11 +20,15 @@ fi
 echo "[sandbox] starting worker $NODE_ID (capabilities: $CAPS)"
 exec docker run --rm -d --name "swarm-worker-$NODE_ID" \
   --gpus "${GPU:-all}" \
-  --network host \
+  --network bridge \
+  --add-host host.docker.internal:host-gateway \
   --read-only --tmpfs /tmp \
   -e SWARM_ROUTER="$ROUTER" \
   -e SWARM_COMPLETION="$COMPLETION" \
   -e SWARM_GPU="$GPU" -e SWARM_MODEL="$MODEL" \
+  -e SWARM_API_TOKEN="$SWARM_API_TOKEN" \
   swarm-worker python worker.py \
   --router "$ROUTER" --completion "$COMPLETION" \
-  --node-id "$NODE_ID" --capabilities $CAPS --model "$MODEL" --gpu "$GPU"
+  --token "$SWARM_API_TOKEN" --pull \
+  --node-id "$NODE_ID" --capabilities $CAPS --model "$MODEL" --gpu "$GPU" \
+  --speed "${SWARM_SPEED:-}" --share-ratio "${SWARM_SHARE_RATIO:-100}"
