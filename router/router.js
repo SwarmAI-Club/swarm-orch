@@ -6,9 +6,14 @@ const { DatabaseSync } = require("node:sqlite");
 
 const CONFIG = process.env.SWARM_CONFIG || path.join(__dirname, "..", "config", "nodes.json");
 const PORT = process.env.SWARM_ROUTER_PORT || 4900;
-const CREDIT_RATE_PM = Number(process.env.SWARM_CREDIT_RATE_PM || 10); // SWAI per GPU-min (task votes)
-const UPTIME_RATE_PM = Number(process.env.SWARM_UPTIME_RATE_PM || 2);  // SWAI per idle min (Proof-of-Uptime)
+const CREDIT_RATE_PM = Number(process.env.SWARM_CREDIT_RATE_PM || 10); // legacy SWAI per GPU-min (vote) — replaced by token-based
+const UPTIME_RATE_PM = Number(process.env.SWARM_UPTIME_RATE_PM || 2);  // legacy SWAI per idle min — replaced by token-based
 const NET_TOKEN = process.env.SWARM_API_TOKEN || "dev-insecure-token"; // REQUIRED, all endpoints check it
+// ---- SWAI economy v2 (tokens-based) ----
+const SWAI_TOKENS = Number(process.env.SWAI_TOKENS || 10000);      // 1 SWAI = N tokens (input/output 基底)
+const RATE_IN = Number(process.env.SWAI_RATE_IN || 5000);          // 1 SWAI charges per N INPUT tokens  (較平)
+const RATE_OUT = Number(process.env.SWAI_RATE_OUT || 1000);        // 1 SWAI charges per N OUTPUT tokens (貴 5x)
+const SYSTEM_ACCOUNT = "^system^";                                  // NET_TOKEN 用 account（monitor/admin）
 
 // SMTP (forgot-password) — env 或 swarm-support-bot.env
 const SMTP = { user: process.env.SWARM_SMTP_USER, pass: process.env.SWARM_SMTP_PASS, host: "smtp.zoho.com", port: 465 };
@@ -28,38 +33,78 @@ if (!SMTP.user || !SMTP.pass) {
 const DATA_DIR = process.env.SWARM_DATA_DIR || path.join(__dirname, "..", "data");
 fs.mkdirSync(DATA_DIR, { recursive: true });
 const db = new DatabaseSync(path.join(DATA_DIR, "ledger.db"));
+// credits: key = ACCOUNT(account/email)；歸戶，用戶 5 node 全入同一 account
 db.exec(`CREATE TABLE IF NOT EXISTS credits(
-  node_id TEXT PRIMARY KEY,
+  account TEXT PRIMARY KEY,
   balance INTEGER NOT NULL DEFAULT 0
 )`);
 db.exec(`CREATE TABLE IF NOT EXISTS ledger(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts INTEGER NOT NULL,
   type TEXT NOT NULL,
-  node_id TEXT NOT NULL,
+  account TEXT NOT NULL,
+  node_id TEXT,
   task_id TEXT,
   gpu_min REAL,
   credit INTEGER NOT NULL,
+  tokens_in INTEGER DEFAULT 0,
+  tokens_out INTEGER DEFAULT 0,
+  kind TEXT,
   note TEXT
 )`);
-function creditBalance(nodeId) {
-  const row = db.prepare("SELECT balance FROM credits WHERE node_id=?").get(nodeId);
+// 檢查 versions 表有冇做過 migration
+const oldCredits = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='credits_old'").get();
+if (!oldCredits && db.prepare("SELECT COUNT(*) c FROM credits").get().c > 0) {
+  // 舊 credits 係 node_id key；開新表 credits_old 保留 + 唔自動清
+  db.exec("ALTER TABLE credits RENAME TO credits_old");
+  db.exec(`CREATE TABLE IF NOT EXISTS credits(
+    account TEXT PRIMARY KEY,
+    balance INTEGER NOT NULL DEFAULT 0
+  )`);
+}
+// 舊 ledger 加新欄（tokens_in/out/kind/account）—— 用 ALTER 有缺就補
+(function migrateLedger() {
+  const cols = db.prepare("PRAGMA table_info(ledger)").all().map(c => c.name);
+  const adds = [];
+  if (!cols.includes("tokens_in")) adds.push("ADD COLUMN tokens_in INTEGER DEFAULT 0");
+  if (!cols.includes("tokens_out")) adds.push("ADD COLUMN tokens_out INTEGER DEFAULT 0");
+  if (!cols.includes("kind")) adds.push("ADD COLUMN kind TEXT");
+  if (!cols.includes("account")) adds.push("ADD COLUMN account TEXT");
+  for (const a of adds) db.exec(`ALTER TABLE ledger ${a}`);
+})();
+function creditBalance(account) {
+  const row = db.prepare("SELECT balance FROM credits WHERE account=?").get(account);
   return row ? row.balance : 0;
 }
-function ledgerMint(nodeId, gpuMin, taskId, note = "") {
-  const credit = Math.max(1, Math.round((gpuMin || 0) * CREDIT_RATE_PM));
-  db.prepare("INSERT INTO credits(node_id,balance) VALUES(?,?) ON CONFLICT(node_id) DO UPDATE SET balance=balance+?").run(nodeId, credit, credit);
-  db.prepare("INSERT INTO ledger(ts,type,node_id,task_id,gpu_min,credit,note) VALUES(?,?,?,?,?,?,?)")
-    .run(Date.now(), "mint", nodeId, taskId || null, gpuMin || 0, credit, note);
+// tokens → SWAI：input 用 RATE_IN，output 用 RATE_OUT（最少 1）
+function tokensToCredit(tokensIn, tokensOut) {
+  const sIn = Math.round((tokensIn || 0) / RATE_IN);
+  const sOut = Math.round((tokensOut || 0) / RATE_OUT);
+  return Math.max(1, sIn + sOut);
+}
+function ledgerMint(account, opts = {}) {
+  const { tokensIn = 0, tokensOut = 0, taskId = null, note = "", nodeId = "", kind = "vote" } = opts;
+  const credit = tokensToCredit(tokensIn, tokensOut);
+  db.prepare("INSERT INTO credits(account,balance) VALUES(?,?) ON CONFLICT(account) DO UPDATE SET balance=balance+?")
+    .run(account, credit, credit);
+  db.prepare("INSERT INTO ledger(ts,type,account,node_id,task_id,gpu_min,credit,tokens_in,tokens_out,kind,note) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
+    .run(Date.now(), "mint", account, nodeId || "", taskId || null, 0, credit, tokensIn || 0, tokensOut || 0, kind || "vote", note);
   return credit;
 }
-function ledgerBurn(nodeId, credit, taskId, note = "") {
-  const bal = creditBalance(nodeId);
+function ledgerBurn(account, credit, taskId, note = "") {
+  const bal = creditBalance(account);
   const actual = Math.min(credit, bal);
-  db.prepare("UPDATE credits SET balance=balance-? WHERE node_id=?").run(actual, nodeId);
-  db.prepare("INSERT INTO ledger(ts,type,node_id,task_id,gpu_min,credit,note) VALUES(?,?,?,?,?,?,?)")
-    .run(Date.now(), "burn", nodeId, taskId || null, 0, actual, note);
+  db.prepare("UPDATE credits SET balance=balance-? WHERE account=?").run(actual, account);
+  db.prepare("INSERT INTO ledger(ts,type,account,node_id,task_id,gpu_min,credit,tokens_in,tokens_out,kind,note) VALUES(?,?,?,?,?,?,?,0,0,?,?)")
+    .run(Date.now(), "burn", account, "", taskId || null, 0, actual, "task", note);
   return actual;
+}
+// token → account（歸戶 key：所有 worker/API 用同一 user token 都入同一 email account）
+function accountForToken(t) {
+  if (!t) return null;
+  if (t === NET_TOKEN) return SYSTEM_ACCOUNT;
+  const u = findUserByToken ? findUserByToken(t) : null;
+  return u ? u.email : null;
 }
 
 // ---- Client portal: users (email login -> own API token) ----
@@ -124,6 +169,7 @@ function jaccard(a, b) {
 
 function matchCapabilities(required, candidates) {
   return candidates
+    .filter(n => Array.isArray(n.capabilities))
     .map(n => ({ node: n, score: jaccard(required, n.capabilities) }))
     .filter(x => x.score > 0)
     .sort((a, b) => b.score - a.score);
@@ -133,20 +179,41 @@ app.post("/register", (req, res) => {
   const { node_id, capabilities, model, gpu, max_context, speed, url } = req.body;
   const n = registry.get(node_id) || { uptime_s: 0, last_status: null };
   Object.assign(n, { node_id, capabilities, model, gpu, max_context, speed, url, pull: !!req.body.pull });
+  const tk = req.get("x-swarm-token");
+  n.account = accountForToken(tk) || n.account || SYSTEM_ACCOUNT;
   registry.set(node_id, n);
   res.json({ ok: true, nodes: registry.size, uptime_rate_pm: UPTIME_RATE_PM, credit_rate_pm: CREDIT_RATE_PM });
 });
 
 // protocol v0.2: node_status heartbeat (+ Proof-of-Uptime accumulation)
+// IDLE_SHARING 時間差 → 按 node.speed 產能 mint（tokens → SWAI）歸入 node.account
 app.post("/status", (req, res) => {
   const { node_id, status, vram_used_gb, model_loaded, load, sleeping, ts } = req.body || {};
-  const n = registry.get(node_id);
+  let n = registry.get(node_id);
+  // 心跳但未註冊（router 重啟後）→ 自動補註冊（node_id 已知）
+  if (!n && node_id) {
+    n = { node_id, uptime_s: 0, last_status: null, capabilities: [], url: "" };
+    const tk = req.get("x-swarm-token");
+    n.account = accountForToken(tk) || SYSTEM_ACCOUNT;
+    n.speed = req.body.speed || "";
+    registry.set(node_id, n);
+  }
   if (n) {
     const nowMs = Date.now();
     const tsS = (ts && ts < 1e12) ? Number(ts) : (nowMs / 1000);
     const last = n.last_status;
-    if (last && last.__state === "IDLE_SHARING") {
-      n.uptime_s += (nowMs - last.__tsMs) / 1000;
+    if (last && last.__state === "IDLE_SHARING") { n.uptime_s += (nowMs - last.__tsMs) / 1000; }
+    if (last && last.__state === "IDLE_SHARING" && status === "IDLE_SHARING") {
+      // 連續 idle：呢段時間差 idle 產能 → mint（tok/s × sec → tokens）
+      const dtSec = (nowMs - last.__tsMs) / 1000;
+      const spd = parseFloat(n.speed) || 0;
+      if (dtSec > 5 && spd > 0) {
+        const acc = n.account || accountForToken(req.get("x-swarm-token")) || SYSTEM_ACCOUNT;
+        const tokens = Math.round(spd * dtSec);
+        const c = ledgerMint(acc, { tokensIn: 0, tokensOut: tokens, taskId: null, note: "idle_uptime", nodeId: node_id, kind: "idle" });
+        n.last_mint_idle = { ts: nowMs, tokens, credit: c };
+        console.log(`[idle] ${node_id} +${c} SWAI (${tokens} tokens, ${dtSec.toFixed(0)}s idle)`);
+      }
     }
     n.last_status = { status, vram_used_gb, model_loaded, load, sleeping, ts: tsS, __state: status, __tsMs: nowMs };
   }
@@ -177,10 +244,10 @@ app.post("/beacon", async (req, res) => {
 });
 
 app.post("/result", (req, res) => {
-  const { task_id, node_id, votes, duration_ms } = req.body || {};
+  const { task_id, node_id, votes, duration_ms, tokens_in, tokens_out } = req.body || {};
   if (!task_id || !node_id) return res.status(400).json({ ok: false, error: "task_id&node_id required" });
   const rec = resultsStore.get(task_id) || { ts: Date.now(), list: [] };
-  rec.list.push({ node_id, votes: votes || [], duration_ms: duration_ms || 0 });
+  rec.list.push({ node_id, votes: votes || [], duration_ms: duration_ms || 0, tokens_in: tokens_in || 0, tokens_out: tokens_out || 0 });
   resultsStore.set(task_id, rec);
   res.json({ ok: true, task_id, results: rec.list.length });
 });
@@ -196,36 +263,54 @@ app.post("/vote", async (req, res) => {
     const ans = String(v.content).trim();
     tally[ans] = (tally[ans] || 0) + (v.confidence || 0.5);
   }
-  // Time-Bank: 每個 provider 按 duration_ms 折算 credit 入帳
+  // Time-Bank v2: 每個 provider 按 實際 input+output tokens 折算 SWAI → 歸入 node.account
   const mints = [];
   for (const r of results) {
-    const gpuMin = (r.duration_ms || 0) / 60000;
-    if (r.node_id && gpuMin > 0) {
-      const c = ledgerMint(r.node_id, gpuMin, r.task_id || req.body.task_id || null, "vote");
-      mints.push({ node_id: r.node_id, credit: c, gpu_min: Number(gpuMin.toFixed(3)) });
+    const acc = (r._account) || (registry.get(r.node_id)?.account) || SYSTEM_ACCOUNT;
+    const tin = r.tokens_in || 0;
+    const tout = r.tokens_out || 0;
+    if (r.node_id) {
+      const c = ledgerMint(acc, { tokensIn: tin, tokensOut: tout, taskId: r.task_id || req.body.task_id || null, note: "vote", nodeId: r.node_id, kind: "vote" });
+      mints.push({ node_id: r.node_id, account: acc, credit: c, tokens_in: tin, tokens_out: tout });
     }
   }
   const winner = Object.entries(tally).sort((a, b) => b[1] - a[1])[0];
+  // 精算：requester 實際應付 = 總 output tokens（providers mint 已由 /vote providers 各自計）
+  // 多退：估費 vs 實際 providers 收到嘅 credits 差額退回 requester
+  try {
+    const tk = req.get("x-swarm-token");
+    const reqAcc = tk ? accountForToken(tk) : null;
+    const estFee = (stored && stored.est_fee) || 0;
+    const providersTotal = mints.reduce((s, m) => s + m.credit, 0);
+    if (estFee > providersTotal) {
+      const refund = estFee - providersTotal;
+      if (reqAcc && refund > 0) ledgerMint(reqAcc, { tokensIn: 0, tokensOut: Math.round(refund * RATE_OUT), taskId, note: "task_refund", nodeId: reqAcc, kind: "refund" });
+    }
+  } catch (e) {}
   res.json({ winner: winner?.[0], confidence: winner?.[1], tally, mints });
 });
 
-// ---- Time-Bank ledger endpoints ----
+// ---- Time-Bank ledger endpoints ---- (account-based; 手動 mint/burn 只俾 admin/NET_TOKEN)
 app.post("/ledger/mint", (req, res) => {
-  const { node_id, task_id, gpu_min } = req.body || {};
-  if (!node_id) return res.status(400).json({ ok: false, error: "node_id required" });
-  const credit = ledgerMint(node_id, Number(gpu_min || 0), task_id, "manual");
-  res.json({ ok: true, node_id, credit, balance: creditBalance(node_id) });
+  const tk = req.get("x-swarm-token");
+  if (tk !== NET_TOKEN) return res.status(403).json({ ok: false, error: "admin only" });
+  const { account, tokens_in = 0, tokens_out = 0, task_id, node_id } = req.body || {};
+  if (!account) return res.status(400).json({ ok: false, error: "account required" });
+  const credit = ledgerMint(account, { tokensIn: Number(tokens_in), tokensOut: Number(tokens_out), taskId: task_id, note: "manual", nodeId: node_id || "", kind: "manual" });
+  res.json({ ok: true, account, credit, balance: creditBalance(account) });
 });
 
 app.post("/ledger/burn", (req, res) => {
-  const { node_id, credit, task_id } = req.body || {};
-  if (!node_id || !credit) return res.status(400).json({ ok: false, error: "node_id & credit required" });
-  const actual = ledgerBurn(node_id, Number(credit), task_id, "manual");
-  res.json({ ok: true, node_id, burned: actual, balance: creditBalance(node_id) });
+  const tk = req.get("x-swarm-token");
+  if (tk !== NET_TOKEN) return res.status(403).json({ ok: false, error: "admin only" });
+  const { account, credit, task_id } = req.body || {};
+  if (!account || !credit) return res.status(400).json({ ok: false, error: "account & credit required" });
+  const actual = ledgerBurn(account, Number(credit), task_id, "manual");
+  res.json({ ok: true, account, burned: actual, balance: creditBalance(account) });
 });
 
-app.get("/credits/:node", (req, res) => {
-  res.json({ node_id: req.params.node, balance: creditBalance(req.params.node) });
+app.get("/credits/:account", (req, res) => {
+  res.json({ account: req.params.account, balance: creditBalance(req.params.account) });
 });
 
 app.get("/ledger/latest", (req, res) => {
@@ -241,14 +326,17 @@ setInterval(() => {
   const cutoff = Date.now() - 30 * 60 * 1000;
   for (const [k, v] of pendingBeacons) if (v.ts && v.ts < cutoff) pendingBeacons.delete(k);
   for (const [k, v] of resultsStore) if (v.ts && v.ts < cutoff) resultsStore.delete(k);
-  // PoU: IDLE_SHARING 累積 uptime >= 1min → mint SWAI
+  // legacy fallback sweep: 兜返舊 /status 累積嘅 uptime_s（新 /status 已即時 mint idle，呢度補漏）
   for (const n of registry.values()) {
-    if (n.uptime_s >= 60) {
+    if (n.uptime_s >= 60 && n.speed) {
       const mins = n.uptime_s / 60;
-      const credit = Math.max(1, Math.round(mins * UPTIME_RATE_PM));
-      ledgerMint(n.node_id, mins, null, "uptime");
+      const spd = parseFloat(n.speed) || 0;
+      const tokens = Math.round(spd * mins * 60);
+      const acc = n.account || SYSTEM_ACCOUNT;
+      if (tokens > 0) ledgerMint(acc, { tokensIn: 0, tokensOut: tokens, taskId: null, note: "idle_sweep", nodeId: n.node_id, kind: "idle" });
       n.uptime_s -= mins * 60;
-      console.log(`[uptime] ${n.node_id} +${credit} SWAI (${mins.toFixed(1)}min idle)`);
+    } else if (n.uptime_s >= 60) {
+      n.uptime_s = 0; // 無 speed 計唔到, 清咗佢
     }
   }
 }, 10 * 60 * 1000).unref();
@@ -266,15 +354,19 @@ app.post("/task", async (req, res) => {
   const matches = matchCapabilities(required_capabilities, [...registry.values()]);
   const pushed = [], queued = [], failed = [];
   const payload = { task_id, beacon_id: bid, prompt, n_votes, temperature };
+  resultsStore.set(task_id, { ts: Date.now(), list: [], est_fee: 0, est_tokens_in: 0, est_tokens_out: 0 });
 
-  // 自動扣費：一般用戶（user token）要先有餘額，一次任務收 TASK_FEE（default 10 SWAI）
-  const TASK_FEE = Number(process.env.SWARM_TASK_FEE || 10);
+  // 自動扣費 v2：按 tokens 預估。input = prompt 字數估算; output = n_votes × n_predict 上限（保守）
+  const EST_CHARS_PER_TOKEN = 3.5;
   const reqTok = req.get("x-swarm-token");
-  const reqUser = reqTok ? findUserByToken(reqTok) : null;
-  if (reqUser && reqTok !== NET_TOKEN) {
-    const bal = creditBalance(reqUser.node_id);
-    if (bal < TASK_FEE) return res.status(402).json({ ok: false, error: "SWAI 餘額不足，唔夠出 task", balance: bal, fee: TASK_FEE });
-    ledgerBurn(reqUser.node_id, TASK_FEE, task_id, "task");
+  const tOk = reqTok ? accountForToken(reqTok) : null;
+  if (tOk && reqTok !== NET_TOKEN) {
+    const estIn = Math.round(prompt.length / EST_CHARS_PER_TOKEN);
+    const estOut = n_votes * 512; // 預估 output (n_predict 多數情況)
+    const fee = tokensToCredit(estIn, estOut);
+    const bal = creditBalance(tOk);
+    if (bal < fee) return res.status(402).json({ ok: false, error: "SWAI 餘額不足，唔夠出 task", balance: bal, fee, est_tokens_in: estIn, est_tokens_out: estOut });
+    ledgerBurn(tOk, fee, task_id, "task_estimate");
   }
   for (const { node, score } of matches.slice(0, (req.body.max_targets || CONFIG.max_beacon_targets || 5))) {
     const urlSafe = new RegExp("^https?://(127\.0\.0\.1|100\.|localhost)").test(node.url || "");
@@ -333,15 +425,15 @@ app.post("/portal/login", (req, res) => {
   const { email, password } = req.body || {};
   const u = userByEmail(email);
   if (!u || u.pass_hash !== hashPass(password)) return res.status(401).json({ ok: false, error: "bad credentials" });
-  res.json({ ok: true, email: u.email, api_token: u.token, node_id: u.node_id, balance: creditBalance(u.node_id) });
+  res.json({ ok: true, email: u.email, api_token: u.token, node_id: u.node_id, balance: creditBalance(u.email) });
 });
 
 app.get("/portal/me", (req, res) => {
   const t = req.get("x-swarm-token");
   const u = findUserByToken(t);
   if (!u) return res.status(401).json({ ok: false, error: "invalid token" });
-  const led = db.prepare("SELECT * FROM ledger WHERE node_id=? ORDER BY id DESC LIMIT 20").all(u.node_id);
-  res.json({ ok: true, email: u.email, node_id: u.node_id, balance: creditBalance(u.node_id), journal: led });
+  const led = db.prepare("SELECT * FROM ledger WHERE account=? ORDER BY id DESC LIMIT 20").all(u.email);
+  res.json({ ok: true, email: u.email, node_id: u.node_id, account: u.email, balance: creditBalance(u.email), journal: led });
 });
 
 app.post("/portal/forgot", (req, res) => {
