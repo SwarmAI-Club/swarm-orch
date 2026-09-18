@@ -107,6 +107,7 @@ class Worker:
             "speed": args.speed,
             "share_ratio": args.share_ratio,
             "free": bool(getattr(args, "free", False)),
+            "completion": args.completion,
             "url": f"http://{args.listen}:{args.port}",
             "pull": args.pull,
         }
@@ -174,6 +175,7 @@ class Worker:
                 "speed": getattr(self.args, "speed", ""),
                 "capabilities": self.args.capabilities,
                 "url": self.info.get("url", ""),
+                "completion": self.args.completion,
                 "pull": self.args.pull,
                 "max_context": self.args.max_context,
                 "free": bool(getattr(self.args, "free", False)),

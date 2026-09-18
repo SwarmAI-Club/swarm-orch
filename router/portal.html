@@ -110,7 +110,7 @@ th{color:var(--acc)}
     <div class="card">
       <div class="muted" style="margin-bottom:8px">📊 節點評分（User Profile Stats）</div>
       <table>
-        <thead><tr><th>Node</th><th>Tier</th><th>Model</th><th>Ctx</th><th>tok/s</th><th>Grade</th><th>Free</th></tr></thead>
+        <thead><tr><th>Node</th><th>Tier</th><th>Model</th><th>Ctx</th><th>tok/s</th><th>Grade</th><th>Abilities</th><th>Free</th></tr></thead>
         <tbody id="profile-nodes"></tbody>
       </table>
       <input type="checkbox" id="pf-free-chk" onchange="toggleNodeFree()" style="width:auto"> 將此 node 設為 <b>Free</b>（其他人用唔 burn，你照收 mint）<br>
@@ -207,9 +207,11 @@ async function loadMe(){
     // User Profile: nodes + rating + tier
     const rows = (d.nodes||[]).map(n=>{
       const rt=n.rating||{};
-      return `<tr><td>${n.node_id||''}</td><td>${n.tier||'-'}</td><td>${n.model||'-'}</td><td>${n.ctx||0}</td><td>${n.speed||0}</td><td><b>${rt.grade||'-'}</b> (${rt.score||0})</td><td>${n.free?'✅':'—'}</td></tr>`;
+      const ab=n.abilities||{};
+      const abStr = n.abilities ? [ab.tools&&'🔧tools',ab.thinking&&'🧠thinking',ab.vision&&'👁vision'].filter(Boolean).join(' ') : '—';
+      return `<tr><td>${n.node_id||''}</td><td>${n.tier||'-'}</td><td>${n.model||'-'}</td><td>${n.ctx||0}</td><td>${n.speed||0}</td><td><b>${rt.grade||'-'}</b> (${rt.score||0})</td><td>${abStr}</td><td>${n.free?'✅':'—'}</td></tr>`;
     }).join('');
-    E('profile-nodes').innerHTML = rows || '<tr><td colspan="7" class="muted">未有節點上線 — 用你 API token 起 worker 就有</td></tr>';
+    E('profile-nodes').innerHTML = rows || '<tr><td colspan="8" class="muted">未有節點上線 — 用你 API token 起 worker 就有</td></tr>';
     E('profile-eco').textContent = d.economy_note || '';
     // 填 profile 表單（一次性，唔覆蓋用戶已輸入）
     if (d.profile) {
