@@ -94,6 +94,7 @@ class Worker:
             "gpu": args.gpu,
             "max_context": args.max_context,
             "speed": args.speed,
+            "share_ratio": args.share_ratio,
             "url": f"http://{args.listen}:{args.port}",
             "pull": args.pull,
         }
@@ -154,6 +155,13 @@ class Worker:
                 "status": "IDLE_SHARING" if sleeping else "USER_OCCUPIED",
                 "vram_used_gb": self.args.vram, "model_loaded": self.args.model,
                 "sleeping": sleeping, "ts": int(time.time()),
+                "share_ratio": getattr(self.args, "share_ratio", 100),
+                # 帶返完整資料，令 router 心跳 auto-register 唔會變冇 gpu/vram 嘅空 node
+                "gpu": self.args.gpu, "vram": self.args.vram, "model": self.args.model,
+                "speed": getattr(self.args, "speed", ""),
+                "capabilities": self.args.capabilities,
+                "url": self.info.get("url", ""),
+                "pull": self.args.pull,
             }, headers=_headers(self.args), timeout=10)
             # router 重啟後（registry 空 / 未註冊）→ 自動補完整 /register
             if r.status_code in (401, 404) or r.json().get("ok") is False:
@@ -232,6 +240,8 @@ def main():
     ap.add_argument("--vram", type=int, default=int(os.environ.get("SWARM_VRAM", "0")))
     ap.add_argument("--max-context", type=int, default=int(os.environ.get("SWARM_MAX_CONTEXT", "8192")))
     ap.add_argument("--speed", default=os.environ.get("SWARM_SPEED", ""))
+    ap.add_argument("--share-ratio", type=int, default=int(os.environ.get("SWARM_SHARE_RATIO", "100")),
+                    help="產能貢獻比率 % (0-100)。idle 誘獎同派工優先度按此比例縮減（防蜂擁）。查額時會顯示計法。")
     ap.add_argument("--port", default=5900, type=int)
     ap.add_argument("--listen", default="0.0.0.0")
     ap.add_argument("--n-predict", type=int, default=128)
