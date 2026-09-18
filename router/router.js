@@ -111,6 +111,7 @@ const MODEL_MAP = {
   "swarmai-fast":     { cap: ["reasoning", "analysis"], tier: ["S", "A"], n_votes: 3, label: "勁機優先（5090/4090/2080Ti），貴" },
   "swarmai-normal":   { cap: ["reasoning", "math"], tier: ["B", "C"], n_votes: 3, label: "日常平價（3060/2060 及以下）" },
   "swarmai-fast-vision": { cap: ["vision"], tier: ["S", "A", "B", "C"], n_votes: 1, vision: true, label: "Vision (qwen2.5-vl) 自動分流" },
+  "swarmai-free":     { cap: ["reasoning", "math", "analysis"], tier: ["S", "A", "B", "C"], n_votes: 3, freeOnly: true, label: "免費 node（自由分享）——唔扣費" },
 };
 // tier 收費倍率（需求方）同一緊 mint（供應方）用
 const TIER_RATE = { S: 1.8, A: 1.3, B: 1.0, C: 0.6 };       // 需求方收費
@@ -272,7 +273,7 @@ app.post("/register", (req, res) => {
   const n = registry.get(node_id) || { uptime_s: 0, last_status: null };
   Object.assign(n, { node_id, capabilities, model, gpu, max_context, speed, url, pull: !!req.body.pull });
   n.share_ratio = Math.max(0, Math.min(100, Number(share_ratio !== undefined ? share_ratio : (n.share_ratio || 100))));
-  n.free = !!free;   // free node：要求者唔 burn，Node owner 照收 mint（善意分享）
+  if (!n.free_manual) n.free = !!free;   // free node：owner 設定優先（心跳/register 唔覆寫）
   const tk = req.get("x-swarm-token");
   n.account = accountForToken(tk) || n.account || SYSTEM_ACCOUNT;
   registry.set(node_id, n);
@@ -306,7 +307,7 @@ app.post("/status", (req, res) => {
     if (req.body.speed) n.speed = req.body.speed;
     if (req.body.url) n.url = req.body.url;
     if (req.body.max_context) n.max_context = req.body.max_context;
-    if (req.body.free !== undefined) n.free = !!req.body.free;
+    if (req.body.free !== undefined && !n.free_manual) n.free = !!req.body.free;
     if (Array.isArray(req.body.capabilities) && req.body.capabilities.length) n.capabilities = req.body.capabilities;
     const nowMs = Date.now();
     const tsS = (ts && ts < 1e12) ? Number(ts) : (nowMs / 1000);
@@ -600,11 +601,11 @@ app.post("/v1/chat/completions", async (req, res) => {
     let estFee = 0;
     let freeServed = false;
 
-    // 派工：揀符合 modelKey tier + cap 嘅 node
+    // 派工：揀符合 modelKey tier + cap 嘅 node（freeOnly → 只揀 free node）
     const wantedTiers = mm.tier;
-    let candidates = [...registry.values()].filter(n => n.account && wantedTiers.includes(nodeTier(n)));
+    let candidates = [...registry.values()].filter(n => n.account && wantedTiers.includes(nodeTier(n)) && (!mm.freeOnly || n.free));
     console.log(`[v1] model=${modelKey} caps=${JSON.stringify(mm.cap)} tier=${JSON.stringify(mm.tier)} reg=${registry.size} cand=${candidates.map(c=>c.node_id+":"+nodeTier(c)).join(",")}`);
-    if (!candidates.length) {
+    if (!candidates.length && !mm.freeOnly) {
       candidates = [...registry.values()].filter(n => n.account); // fallback 平價
       console.log(`[v1] fallback all-candidates=${candidates.map(c=>c.node_id).join(",")}`);
     }
@@ -614,8 +615,8 @@ app.post("/v1/chat/completions", async (req, res) => {
     if (!targets.length) {
       return res.status(503).json({ error: { message: "no available worker" }, type: "server_error" });
     }
-    // 收費決定：全 free → 免費（唔 burn）· 有付費 node → 正常估費 burn
-    freeServed = targets.length > 0 && targets.every(t => t.free);
+    // 收費決定：全 free（或 freeOnly model）→ 免費（唔 burn）· 有付費 node → 正常估費 burn
+    freeServed = mm.freeOnly || (targets.length > 0 && targets.every(t => t.free));
     if (reqAcc && reqTok !== NET_TOKEN && !freeServed) {
       const estIn = Math.round(prompt.length / 3.5);
       const estOut = max_tokens;
@@ -764,6 +765,7 @@ app.post("/portal/node_toggle", (req, res) => {
   if (!n) return res.status(404).json({ ok: false, error: "node 唔存在" });
   if (n.account !== u.email) return res.status(403).json({ ok: false, error: "唔係你嘅 node" });
   n.free = !!free;
+  n.free_manual = true;   // owner 設定優先，心跳唔覆寫
   res.json({ ok: true, node_id, free: n.free });
 });
 
