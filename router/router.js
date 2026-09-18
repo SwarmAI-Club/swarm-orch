@@ -134,6 +134,25 @@ function nodeTier(n) {
   if (v >= 10) return "B";
   return "C";
 }
+// 探 backend 能力（tools / thinking / vision）by completion URL -> /props
+async function probeAbilities(completionUrl) {
+  try {
+    const u = new URL(completionUrl);
+    const props = u.protocol === "http:" ? `http://${u.host}/props` : `https://${u.host}/props`;
+    const r = await fetch(props, { signal: AbortSignal.timeout(6000) });
+    const d = await r.json();
+    const caps = d.chat_template_caps || {};
+    const mod = d.modalities || {};
+    return {
+      tools: !!(caps.supports_tools || caps.supports_tool_calls),
+      thinking: !!caps.supports_preserve_reasoning,
+      vision: mod.vision === true,
+      ctx: (d.default_generation_settings || {}).n_ctx || 0,
+    };
+  } catch (e) {
+    return { tools: null, thinking: null, vision: null, ctx: 0, error: String(e.message || e).slice(0, 60) };
+  }
+}
 function tierCharge(tier) { return TIER_RATE[tier] || 1.0; }
 
 // ---- Rating engine (profile 顯示) ----
@@ -207,6 +226,20 @@ function promoValid(code) {
   if (row.valid_to && now > row.valid_to) return null;
   if (row.max_uses && row.used >= row.max_uses) return null;
   return row;
+}
+// 應用 promo（discount：value=折扣比例，0.5 = 五折）；扣費時計算實收費　並　標記已用
+function applyPromoToFee(code, fee) {
+  const p = promoValid(code);
+  if (!p) return { fee, promo: null };
+  if (p.kind === "discount" && p.scope === "all") {
+    const discounted = Math.max(0, Math.round(fee * (p.value || 1)));
+    db.prepare("UPDATE promotions SET used = used + 1 WHERE code=?").run(code);
+    return { fee: discounted, promo: { code, discount: p.value } };
+  }
+  return { fee, promo: { code, note: "kind/scope 唔支援收費折扣" } };
+}
+function promoFromReq(req) {
+  return String((req.body && req.body.promo) || req.get("x-swarm-promo") || "").trim();
 }
 db.exec(`CREATE TABLE IF NOT EXISTS user_keys(
   email TEXT NOT NULL,
@@ -286,6 +319,10 @@ app.post("/register", (req, res) => {
   else if (!n.free_manual) n.free = !!free;   // free node：owner 設定優先（心跳/register 唔覆寫）
   const tk = req.get("x-swarm-token");
   n.account = accountForToken(tk) || n.account || SYSTEM_ACCOUNT;
+  if (req.body.completion) {
+    n.completion = req.body.completion;
+    probeAbilities(req.body.completion).then(a => { n.abilities = a; if (a.ctx) n.max_context = a.ctx; }).catch(() => {});
+  }
   registry.set(node_id, n);
   res.json({ ok: true, nodes: registry.size, uptime_rate_pm: UPTIME_RATE_PM, credit_rate_pm: CREDIT_RATE_PM });
 });
@@ -316,6 +353,10 @@ app.post("/status", (req, res) => {
     if (req.body.model) n.model = req.body.model;
     if (req.body.speed) n.speed = req.body.speed;
     if (req.body.url) n.url = req.body.url;
+    if (req.body.completion && req.body.completion !== n.completion) {
+      n.completion = req.body.completion;
+      probeAbilities(req.body.completion).then(a => { n.abilities = a; if (a.ctx) n.max_context = a.ctx; }).catch(() => {});
+    }
     if (req.body.max_context) n.max_context = req.body.max_context;
     if (req.body.free !== undefined && !n.free_manual) n.free = !!req.body.free;
     if (nodeSettingFree(node_id)) { n.free = true; n.free_manual = true; }
@@ -500,10 +541,13 @@ app.post("/task", async (req, res) => {
   const tOk = reqTok ? accountForToken(reqTok) : null;
   const dispatchList = matches.slice(0, (req.body.max_targets || CONFIG.max_beacon_targets || 5));
   const targetsAllFree = dispatchList.length > 0 && dispatchList.some(m => m.node.free);
+  let promoUsed = null;
   if (tOk && reqTok !== NET_TOKEN && !targetsAllFree) {
     const estIn = Math.round(prompt.length / EST_CHARS_PER_TOKEN);
     const estOut = n_votes * 512; // 預估 output (n_predict 多數情況)
-    const fee = tokensToCredit(estIn, estOut);
+    let fee = tokensToCredit(estIn, estOut);
+    const promoCode = promoFromReq(req);
+    if (promoCode) { const r = applyPromoToFee(promoCode, fee); fee = r.fee; promoUsed = r.promo; }
     const bal = creditBalance(tOk);
     if (bal < fee) return res.status(402).json({ ok: false, error: "SWAI 餘額不足，唔夠出 task", balance: bal, fee, est_tokens_in: estIn, est_tokens_out: estOut });
     ledgerBurn(tOk, fee, task_id, "task_estimate");
@@ -527,7 +571,7 @@ app.post("/task", async (req, res) => {
       failed.push({ node_id: node.node_id, error: e.message });
     }
   }
-  res.json({ ok: true, task_id, beacon_id: bid, pushed, queued, failed });
+  res.json({ ok: true, task_id, beacon_id: bid, pushed, queued, failed, promo_used: promoUsed });
 });
 
 app.get("/results/:task_id", (req, res) => {
@@ -631,10 +675,13 @@ app.post("/v1/chat/completions", async (req, res) => {
     }
     // 收費決定：任何 free node 參與（或有 freeOnly model）→ 免費（唔 burn）；全部付費 node → 正常估費 burn
     freeServed = mm.freeOnly || targets.some(t => t.free);
+    let promoUsed = null;
     if (reqAcc && reqTok !== NET_TOKEN && !freeServed) {
       const estIn = Math.round(prompt.length / 3.5);
       const estOut = max_tokens;
       estFee = tokensToCredit(estIn, estOut, tierCharge(topTier));
+      const promoCode = promoFromReq(req);
+      if (promoCode) { const r = applyPromoToFee(promoCode, estFee); estFee = r.fee; promoUsed = r.promo; }
       const bal = creditBalance(reqAcc);
       if (bal < estFee) return res.status(402).json({ error: { message: `SWAI 餘額不足 (balance ${bal}, need ${estFee})` }, type: "insufficient_balance" });
       ledgerBurn(reqAcc, estFee, null, "v1_chat_estimate");
@@ -678,7 +725,7 @@ app.post("/v1/chat/completions", async (req, res) => {
       id: task_id, object: "chat.completion", created: Math.floor(Date.now()/1000), model: modelKey,
       choices: [{ index: 0, message: { role: "assistant", content: winner || "" }, finish_reason: winner ? "stop" : "length" }],
       usage: { prompt_tokens: Math.round(prompt.length/3.5), completion_tokens: tout, total_tokens: Math.round(prompt.length/3.5) + tout },
-      swarmai: { nodes: p, votes: (rec?.list || []).map(r => r.node_id), confidence: Number(conf.toFixed(3)), est_fee: estFee, free_served: freeServed, image_routed: hasImage },
+      swarmai: { nodes: p, votes: (rec?.list || []).map(r => r.node_id), confidence: Number(conf.toFixed(3)), est_fee: estFee, free_served: freeServed, promo_used: promoUsed, image_routed: hasImage },
     });
   } catch (e) {
     res.status(500).json({ error: { message: String(e.message || e).slice(0, 200) }, type: "server_error" });
@@ -738,6 +785,7 @@ app.get("/portal/me", (req, res) => {
   const nodes = [...registry.values()].filter(n => n.account === u.email).map(n => ({
     node_id: n.node_id, speed: parseFloat(n.speed) || 0, share_ratio: Math.max(0, Math.min(100, Number(n.share_ratio !== undefined ? n.share_ratio : 100))),
     tier: nodeTier(n), ctx: n.max_context || 0, model: n.model || "", gpu: n.gpu || "", free: !!n.free,
+    abilities: n.abilities || null,
     rating: computeRating(n),
   }));
   const prof = db.prepare("SELECT display_name, pref_model, timezone, sleep_start_hour, sleep_end_hour, share_default, max_budget_per_task FROM users WHERE email=?").get(u.email) || {};
