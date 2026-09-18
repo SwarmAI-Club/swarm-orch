@@ -90,3 +90,15 @@
 - `/assign` HMAC 簽名（router `SIGN(task_id::node_id)` 用 `SWARM_ROUTER_SECRET`；worker 驗）→ 直撳 /assign 403
 - `/result` 驗「task 有派過俾呢個 node」（assigned set）→ 防偽造 vote 呃 SWAI
 - `/tasks/poll` 鎖 node 歸屬（token account ≠ node account → 403）
+
+
+## 8. Free Node（per-node 免費分享，2026-09-18）
+- worker `--free` 或 portal `/portal/node_toggle`（owner）開關每個 node 嘅 free mode
+- 全 free targets → 要求者**唔 burn**（est_fee=0）；Node owner **照收 mint**（善意分享，付出咗算力）
+- mixed（有付費 node）→ 照正常收費（保守）
+- `/v1` response 有 `free_served` 標記 + `est_fee`
+- ⚠️ 自由環境有濫用風險；rating guard 部分緩解。揀 node 用 rating。
+
+## 9. API 認證
+- `Authorization: Bearer <token>` 或 `Bearer sk-swai-<token>`（`sk-` 只係 OpenAI 相容前綴，router 自動剝落）
+- worker `--token` 同 `--router-secret` 必填（router 派工簽名用後者）
