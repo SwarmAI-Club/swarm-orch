@@ -106,6 +106,7 @@ class Worker:
             "max_context": args.max_context,
             "speed": args.speed,
             "share_ratio": args.share_ratio,
+            "free": bool(getattr(args, "free", False)),
             "url": f"http://{args.listen}:{args.port}",
             "pull": args.pull,
         }
@@ -175,6 +176,7 @@ class Worker:
                 "url": self.info.get("url", ""),
                 "pull": self.args.pull,
                 "max_context": self.args.max_context,
+                "free": bool(getattr(self.args, "free", False)),
             }, headers=_headers(self.args), timeout=10)
             # router 重啟後（registry 空 / 未註冊）→ 自動補完整 /register
             if r.status_code in (401, 404) or r.json().get("ok") is False:
@@ -262,6 +264,8 @@ def main():
     ap.add_argument("--speed", default=os.environ.get("SWARM_SPEED", ""))
     ap.add_argument("--share-ratio", type=int, default=int(os.environ.get("SWARM_SHARE_RATIO", "100")),
                     help="產能貢獻比率 % (0-100)。idle 誘獎同派工優先度按此比例縮減（防蜂擁）。查額時會顯示計法。")
+    ap.add_argument("--free", action="store_true", default=os.environ.get("SWARM_FREE", "").lower() in ("1","true","yes"),
+                    help="免費節點：其他人用唔 burn token，你照收 mint（善意分享）")
     ap.add_argument("--port", default=5900, type=int)
     ap.add_argument("--listen", default="0.0.0.0")
     ap.add_argument("--n-predict", type=int, default=128)
