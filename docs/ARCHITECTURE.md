@@ -78,21 +78,35 @@ swarm-node-heal.sh：backend down → remote restart（cron 5min）
 
 ## 5. 定價 / Tier / 分流（2026-09-18 鎖定）
 
-| Logical model | 派去 | 收費 |
-|---|---|---|
-| `swarmai-fast` | tier S/A（5090/4090/2080Ti）| 貴 S×1.8 / A×1.3 |
-| `swarmai-normal` | tier B 以下（3060/2060/≤8GB）| 平 B×1.0 / C×0.6 |
-| `swarmai-fast-vision` | qwen2.5-vl | 純按 tokens |
+### 對外 Logical model（用戶見到）
+| Logical model | 派去 | 收費 | 備註 |
+|---|---|---|---|
+| `swarmai-fast` | tier S/A（5090/4090/2080Ti）+ 任 free node | 貴 S×1.8 / A×1.3 | 高 grade 優先 |
+| `swarmai-normal` | tier B/C + 任 free node | 平 B×1.0 / C×0.6 | 高 grade 優先 |
+| `swarmai-free` | 只 free node | **免費（唔 burn）** | 無 free node → 503 |
+| `swarmai-vision`（隱藏）| qwen2.5-vl | 純按 tokens | 自動分流，唔對外列 |
 
-- **tier 表**：S=5090/4090（×1.8 files→1.8 mint）· A=2080Ti/3090（×1.3）· B=3060/2060 12G（×1.0）· C=≤8GB（×0.6 收費 / ×0.7 mint）
+- **tier 表**：S=5090/4090（×1.8 收費，mint ×1.8）· A=2080Ti/3090（×1.3）· B=3060/2060 12G（×1.0）· C=≤8GB（×0.6 收費 / ×0.7 mint）
 - **fallback**：`swarmai-fast` 冇 S/A 機 → fallback B 但**照收 normal 平價**
-- **排序**：快 + rating 高優先
-- **Vision 分流**：detect `image_url` / `data:image/` → 自動 model=`swarmai-fast-vision`，純按 tokens 收費（唔另收），image ≤4MB cap
+- **排序**：`matchCapabilities` score（= 能力 Jaccard × share_ratio × rating）為主，speed 做 tiebreak — 高 grade 優先
+- **free 混入**：fast/normal 嘅 candidates 一定含 free node；targets 有任一個 free → `free_served:true` = 免費
+- **Vision 分流**：detect `image_url`/`data:image/` → 自動 `swarmai-vision`（隱藏），純按 tokens，image ≤4MB
+- **/v1/models** 只列 fast/normal/free（vision 隱藏）
+
+### LLM abilities 探測（profile 顯示）
+- worker 註冊帶 `completion` URL → router probe `/props` `chat_template_caps` + `modalities`
+- 得出 `tools / thinking / vision / ctx` 存入 registry + `/portal/me` nodes + portal「Abilities」欄（🔧🧠👁）
+
+## 5b. 消費側 promo（coupon）
+- **兌換型（reward）**：`POST /portal/redeem {code}` → 即時加 token 入 account（`kind=reward`）
+  - **每人一次**（`promo_uses(email,code)`）· **週期**（valid_from/to）· **總次數上限**（max_uses）
+  - 例：`WELCOME50` = +50 SWAI，每人一次，至 2026-12-31
+- 消費折扣型：`applyPromoToFee`（`X-Swarm-Promo` header 或 body.promo）折扣 burn（舊機制，兩者並存）
 
 ## 6. Pilot 優惠（Phase 1 target）
-- 開戶送 **50 SWAI** 試玩（「pilot 試玩額」）
-- `promotions` 表 + 邀請 code（discount / mint_boost）
-- Portal 顯示 promo 橫幅
+- 開戶送 **50 SWAI** 試玩（`SIGNUP_BONUS`）+ coupon 兌換（WELCOME50 等）
+- `promotions` 表（discount / reward）+ `/admin/promo`（admin 建）
+- Portal 顯示 promo 橫幅 + 兌換輸入框
 - seasonal 重玩法 → 有一定用戶後嘅 milestone
 
 ## 7. 評分（Rating）— P3
@@ -110,11 +124,18 @@ mint mult = 0.75 + rating/100×0.5；派工 sort 乘 rating
 |---|---|---|
 | P0 | 基建收口：2060a/b worker、清 duplicate、launcher 防重 | ✅ /nodes=5-6 每 port 1 |
 | P1 | /v1/models + /v1/chat + MODEL_MAP + tier 收費 | ✅ (2026-09-18 實測) |
-| P1b | image detect → vision route + image_data | ✅ 自動 swarmai-fast-vision 純 tokens |
+| P1b | image detect → vision route + image_data | ✅ 自動 swarmai-vision（隱藏）純 tokens |
 | P2 | /result 驗 node、poll 鎖 node、assign HMAC auth 封網 | ✅ 403 verified；封網 pending |
-| P3 | Profile 完整 + Grade + rating 入派工 | ✅ Grade S/A/B/C + dispatch weighted by rating |
-| P4 | 送分 50 + promo + 邀請 code | ✅ 開戶送 50、/admin/promo、banner |
+| P3 | Profile 完整 + Grade + rating 入派工 + abilities | ✅ Grade S/A/B/C + dispatch weighted + tools/thinking/vision |
+| P4 | 送分 50 + coupon 兌換（reward 每人一次）+ banner | ✅ /portal/redeem、WELCOME50、Square |
 | P5 | docker bridge + host.docker.internal + nvidia-smi tier | ✅ bridge+host-gateway+pull；nvidia-smi pending |
+| P6 | opencode-telegram 接入 SwarmAI 3 model | ✅ provider=swarmai 喺 opencode.json，/model 切換 |
+
+## 11. opencode-telegram 接入 SwarmAI（P6，2026-09-18）
+- `opencode.json` 新增 **`provider.swarmai`**（`@ai-sdk/openai-compatible`，baseURL `https://swarmai.club/swarm/v1`，apiKey = 主人 SWAI token `swai-7145...`）
+- models：`swarmai-fast` / `swarmai-normal` / `swarmai-free`
+- `opencode-telegram-bot/.env` default：`OPENCODE_MODEL_PROVIDER=swarmai`、`OPENCODE_MODEL_ID=swarmai-fast`
+- Telegram `/model swarmai-fast|normal|free` 切換測試；API key 會扣主人 account `smarcoytst6@gmail.com` balance
 
 ## 10. 已知限制 / 將來（milestone）
 - Accuracy 需要「驗證任務」先可靠（confidence 而家 worker 硬填 0.9）
