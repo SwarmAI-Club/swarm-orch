@@ -90,7 +90,25 @@ th{color:var(--acc)}
       <table><thead><tr><th><span data-i18n="p_th_label">label</span></th><th><span data-i18n="p_th_token">token</span></th><th></th></tr></thead><tbody id="keys"></tbody></table>
     </div>
     <div class="card">
-      <div class="muted" style="margin-bottom:8px">👤 User Profile — 你嘅節點同評分</div>
+      <div class="muted" style="margin-bottom:8px">👤 User Profile — 可更新設定</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:.85rem">
+        <div><label style="display:block;margin:0 0 2px;font-size:.78rem">顯示名</label><input id="pf-name" placeholder="你叫咩名"></div>
+        <div><label style="display:block;margin:0 0 2px;font-size:.78rem">時區</label><input id="pf-tz" placeholder="Asia/Hong_Kong"></div>
+        <div><label style="display:block;margin:0 0 2px;font-size:.78rem">睡眠開始時 (0-23)</label><input id="pf-sleep-s" type="number" min="0" max="23"></div>
+        <div><label style="display:block;margin:0 0 2px;font-size:.78rem">睡眠結束時 (0-23)</label><input id="pf-sleep-e" type="number" min="0" max="23"></div>
+        <div><label style="display:block;margin:0 0 2px;font-size:.78rem">預設 model</label>
+          <select id="pf-model" style="width:100%;padding:8px;border-radius:8px;border:1px solid #1f2937;background:#0b1220;color:var(--txt)">
+            <option value="swarmai-fast">swarmai-fast（快，貴）</option>
+            <option value="swarmai-normal">swarmai-normal（平）</option>
+          </select>
+        </div>
+        <div><label style="display:block;margin:0 0 2px;font-size:.78rem">新機預設 share % (0-100)</label><input id="pf-share" type="number" min="0" max="100"></div>
+      </div>
+      <button style="margin-top:10px;width:auto;padding:9px 20px" onclick="saveProfile()">儲存 Profile</button>
+      <div class="muted" id="pf-status" style="margin-top:6px"></div>
+    </div>
+    <div class="card">
+      <div class="muted" style="margin-bottom:8px">📊 節點評分（User Profile Stats）</div>
       <table>
         <thead><tr><th>Node</th><th>Tier</th><th>Model</th><th>Ctx</th><th>tok/s</th><th>Grade</th></tr></thead>
         <tbody id="profile-nodes"></tbody>
@@ -169,6 +187,11 @@ function enter(d){
   E('dash').classList.remove('hide');
   document.getElementById('p-login').classList.add('hide');
   document.getElementById('p-signup').classList.add('hide');
+  document.getElementById('p-forgot').classList.add('hide');
+  document.getElementById('p-reset').classList.add('hide');
+  // 登入後隱藏登入/開戶 tabs
+  const tabs = document.querySelector('.tabs');
+  if (tabs) tabs.classList.add('hide');
   loadMe();
   setInterval(loadMe, 15000);
 }
@@ -186,6 +209,19 @@ async function loadMe(){
     }).join('');
     E('profile-nodes').innerHTML = rows || '<tr><td colspan="6" class="muted">未有節點上線 — 用你 API token 起 worker 就有</td></tr>';
     E('profile-eco').textContent = d.economy_note || '';
+    // 填 profile 表單（一次性，唔覆蓋用戶已輸入）
+    if (d.profile) {
+      const pf = d.profile;
+      if (!document.__pfSeed) {
+        if (E('pf-name')) E('pf-name').value = pf.display_name || '';
+        if (E('pf-tz')) E('pf-tz').value = pf.timezone || 'UTC';
+        if (E('pf-sleep-s')) E('pf-sleep-s').value = pf.sleep_start_hour ?? 0;
+        if (E('pf-sleep-e')) E('pf-sleep-e').value = pf.sleep_end_hour ?? 7;
+        if (E('pf-model')) E('pf-model').value = pf.pref_model || 'swarmai-normal';
+        if (E('pf-share')) E('pf-share').value = pf.share_default ?? 100;
+        document.__pfSeed = true;
+      }
+    }
     loadKeys();
   }catch(e){ E('led').textContent=I('p_j_loadfail')+': '+e; }
 }
@@ -213,6 +249,22 @@ async function revokeKey(tok){
 }
 
 function logout(){ location.reload(); }
+
+async function saveProfile(){
+  const body = {
+    display_name: E('pf-name').value,
+    timezone: E('pf-tz').value,
+    sleep_start_hour: Number(E('pf-sleep-s').value),
+    sleep_end_hour: Number(E('pf-sleep-e').value),
+    pref_model: E('pf-model').value,
+    share_default: Number(E('pf-share').value),
+  };
+  try{
+    const r = await fetch('/portal/update_profile', {method:'POST', headers:{'content-type':'application/json','x-swarm-token':window.__tok}, body: JSON.stringify(body)});
+    const d = await r.json();
+    E('pf-status').textContent = d.ok ? '✅ 已儲存' : '❌ '+(d.error||'');
+  }catch(e){ E('pf-status').textContent='❌ '+e; }
+}
 </script>
 
 </body>
