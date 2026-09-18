@@ -37,3 +37,62 @@ curl -s -H "x-swarm-token: <token>" -X POST "https://swarmai.club/swarm/vote" \
 # 睇額
 curl -s -H "x-swarm-token: <token>" "https://swarmai.club/swarm/credits/<client-xxx>"
 ```
+
+## 用 OpenAI-compatible API（SwarmAI Gateway）
+
+SwarmAI 提供 OpenAI 兼容端點 — 直接 replace 任何 OpenAI client 嘅 base_url + api_key 就用得。
+
+### 基本資料
+- **Base URL**: `https://swarmai.club/swarm/v1`
+- **API key**: `sk-swai-<你條 X-Swarm-Token>`（portal 攞）
+- **Models**:
+  - `swarmai-fast` — 派去 S/A tier 勁機（5090/4090/2080Ti），收費貴（×1.8/×1.3）
+  - `swarmai-normal` — 派去 B/C tier 平機，收費平（×1.0/×0.6）
+  - vision 自動分流：messages 含 base64 `image_url` → 自動用 qwen2.5-vl
+- **收費**: 按 tokens（in 5000t/SWAI、out 1000t/SWAI × tier 倍率）；balance 唔夠 → 402
+
+### curl 例子
+```bash
+curl https://swarmai.club/swarm/v1/chat/completions \
+  -H "Authorization: Bearer sk-swai-<token>" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"swarmai-fast","messages":[{"role":"user","content":"Hello"}],"max_tokens":200}'
+```
+
+### Python（openai SDK）
+```python
+from openai import OpenAI
+client = OpenAI(base_url="https://swarmai.club/swarm/v1",
+                api_key="sk-swai-<token>")
+r = client.chat.completions.create(
+    model="swarmai-fast",
+    messages=[{"role":"user","content":"Hello"}])
+print(r.choices[0].message.content)
+```
+
+### Node.js（openai 套件）
+```js
+import OpenAI from "openai";
+const client = new OpenAI({ baseURL: "https://swarmai.club/swarm/v1", apiKey: "sk-swai-" + TOKEN });
+const r = await client.chat.completions.create({ model: "swarmai-normal", messages: [{role:"user",content:"Hi"}] });
+console.log(r.choices[0].message.content);
+```
+
+### Vision（自動分流）
+```python
+b64 = open("img.png","rb").read()  # 或任何 base64
+r = client.chat.completions.create(
+    model="swarmai-normal",   # 唔需要特別揀 vision model
+    messages=[{"role":"user","content":[
+        {"type":"text","text":"點樣形容呢張圖？"},
+        {"type":"image_url","image_url":{"url":f"data:image/png;base64,{b64_base64}"}}
+    ]}])
+```
+> SwarmAI 偵測到 `image_url`/`data:image/` 自動 route 去 vision LLM（qwen2.5-vl），純按 tokens 收費。
+
+### 回覆格式
+```json
+{"choices":[{"message":{"role":"assistant","content":"..."}}],
+ "usage":{"prompt_tokens":..,"completion_tokens":..},
+ "swarmai":{"nodes":[...],"votes":[...],"confidence":..,"est_fee":..}}
+```
