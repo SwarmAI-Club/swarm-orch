@@ -72,10 +72,6 @@ if (!oldCredits && db.prepare("SELECT COUNT(*) c FROM credits").get().c > 0) {
   if (!cols.includes("account")) adds.push("ADD COLUMN account TEXT");
   for (const a of adds) db.exec(`ALTER TABLE ledger ${a}`);
 })();
-function creditBalance(account) {
-  const row = db.prepare("SELECT balance FROM credits WHERE account=?").get(account);
-  return row ? row.balance : 0;
-}
 // tokens → SWAI：input 用 RATE_IN，output 用 RATE_OUT（最少 1）。tierMult 需求收費倍率
 function tokensToCredit(tokensIn, tokensOut, tierMult = 1.0) {
   const sIn = Math.round((tokensIn || 0) / RATE_IN);
@@ -139,6 +135,21 @@ function nodeTier(n) {
 }
 function tierCharge(tier) { return TIER_RATE[tier] || 1.0; }
 
+// ---- Rating engine (profile 顯示) ----
+function gradeFor(score) { return score >= 90 ? "S" : score >= 80 ? "A" : score >= 65 ? "B" : score >= 50 ? "C" : "D"; }
+function computeRating(node) {
+  // 5 維（Accuracy beta 唔落）→ 0-100
+  const spd = parseFloat(node.speed) || 0;
+  const speedScore = Math.min(100, Math.round((spd / 40) * 100));       // 40 tok/s = 100
+  const availScore = 100;                                               // heartbeat 有 = 100（簡化）
+  const capScore = Math.min(100, Math.round(((node.max_context || 0) / 65536) * 100));
+  const trustScore = Math.max(0, 100 - ((node.trust_penalty || 0)));
+  const score = Math.round(speedScore * 0.5 + availScore * 0.25 + capScore * 0.15 + trustScore * 0.10);
+  return { score, grade: gradeFor(score), dimensions: { speed: speedScore, availability: availScore, capacity: capScore, trust: trustScore, accuracy: null } };
+}
+function creditBalance(account) {
+  return db.prepare("SELECT balance FROM credits WHERE account=?").get(account)?.balance || 0;
+}
 // ---- Client portal: users (email login -> own API token) ----
 db.exec(`CREATE TABLE IF NOT EXISTS users(
   email TEXT PRIMARY KEY,
@@ -254,6 +265,7 @@ app.post("/status", (req, res) => {
     if (req.body.model) n.model = req.body.model;
     if (req.body.speed) n.speed = req.body.speed;
     if (req.body.url) n.url = req.body.url;
+    if (req.body.max_context) n.max_context = req.body.max_context;
     if (Array.isArray(req.body.capabilities) && req.body.capabilities.length) n.capabilities = req.body.capabilities;
     const nowMs = Date.now();
     const tsS = (ts && ts < 1e12) ? Number(ts) : (nowMs / 1000);
@@ -659,6 +671,8 @@ app.get("/portal/me", (req, res) => {
   const led = db.prepare("SELECT * FROM ledger WHERE account=? ORDER BY id DESC LIMIT 20").all(u.email);
   const nodes = [...registry.values()].filter(n => n.account === u.email).map(n => ({
     node_id: n.node_id, speed: parseFloat(n.speed) || 0, share_ratio: Math.max(0, Math.min(100, Number(n.share_ratio !== undefined ? n.share_ratio : 100))),
+    tier: nodeTier(n), ctx: n.max_context || 0, model: n.model || "", gpu: n.gpu || "",
+    rating: computeRating(n),
   }));
   res.json({
     ok: true, email: u.email, node_id: u.node_id, account: u.email, balance: creditBalance(u.email),

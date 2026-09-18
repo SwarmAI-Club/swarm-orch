@@ -174,6 +174,7 @@ class Worker:
                 "capabilities": self.args.capabilities,
                 "url": self.info.get("url", ""),
                 "pull": self.args.pull,
+                "max_context": self.args.max_context,
             }, headers=_headers(self.args), timeout=10)
             # router 重啟後（registry 空 / 未註冊）→ 自動補完整 /register
             if r.status_code in (401, 404) or r.json().get("ok") is False:
