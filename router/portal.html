@@ -35,6 +35,12 @@ th{color:var(--acc)}
 <div class="wrap">
   <h1>🐝 SwarmAI Client Portal</h1>
   <div class="sub"><span data-i18n="p_sub">Login → 攞 API token → 睇你嘅 SWAI 點數（瞓覺就賺 · 用 AI 就扣）</span></div>
+  <div id="promo-banner" class="card" style="background:linear-gradient(90deg,rgba(34,211,238,.12),rgba(168,85,247,.12));border-color:#22d3ee;padding:10px 14px;font-size:.85rem;margin-bottom:14px">
+    🎉 <span data-i18n="p_promo">Pilot 試玩：開戶即送 50 SWAI 試玩額 · 邀請朋友雙送</span>
+  </div>
+  <script>
+  (async()=>{ try{ const r=await fetch('/portal/promos',{headers:{'x-swarm-token':window.__tok||''}}); if(r.ok){ const d=await r.json(); if(d.ok&&document.getElementById('promo-banner')){ const codes=(d.promos||[]).map(p=>p.code).join(' · '); if(codes) document.getElementById('promo-banner').textContent='🎉 Pilot: '+codes; } } }catch(e){} })();
+  </script>
 
   <div class="tabs">
     <div class="tab active" data-t="login"><span data-i18n="p_tab_login">登入</span></div>
