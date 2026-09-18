@@ -120,6 +120,15 @@ const MODEL_MAP = {
 const TIER_RATE = { S: 1.8, A: 1.3, B: 1.0, C: 0.6 };       // 需求方收費
 const TIER_MINT = { S: 1.8, A: 1.3, B: 1.0, C: 0.7 };       // 供應方 mint
 // node → tier（由 gpu/vram 簡單判定；register 可帶 gpu 名）
+const R_SECRET = process.env.SWARM_ROUTER_SECRET || NET_TOKEN; // 派工簽名 secret
+function signAssign(taskId, nodeId) {
+  return crypto.createHmac("sha256", String(R_SECRET)).update(`${taskId}::${nodeId}`).digest("hex");
+}
+function verifyAssign(taskId, nodeId, sig) {
+  if (!sig) return false;
+  const expect = signAssign(taskId, nodeId);
+  return sig.length === expect.length && crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expect));
+}
 function nodeTier(n) {
   const g = String(n.gpu || "").toLowerCase();
   const v = n.vram || 0;
@@ -296,7 +305,10 @@ app.post("/beacon", async (req, res) => {
 app.post("/result", (req, res) => {
   const { task_id, node_id, votes, duration_ms, tokens_in, tokens_out } = req.body || {};
   if (!task_id || !node_id) return res.status(400).json({ ok: false, error: "task_id&node_id required" });
-  const rec = resultsStore.get(task_id) || { ts: Date.now(), list: [] };
+  const rec = resultsStore.get(task_id);
+  // P2 防偽：task 必須有派過俾呢個 node（assigned set）先收 result
+  if (!rec || !rec.assigned || !rec.assigned.has(node_id))
+    return res.status(403).json({ ok: false, error: "task 未指派俾呢個 node" });
   rec.list.push({ node_id, votes: votes || [], duration_ms: duration_ms || 0, tokens_in: tokens_in || 0, tokens_out: tokens_out || 0 });
   resultsStore.set(task_id, rec);
   res.json({ ok: true, task_id, results: rec.list.length });
@@ -430,16 +442,17 @@ app.post("/task", async (req, res) => {
   }
   for (const { node, score } of matches.slice(0, (req.body.max_targets || CONFIG.max_beacon_targets || 5))) {
     const urlSafe = new RegExp("^https?://(127\.0\.0\.1|100\.|localhost)").test(node.url || "");
+    const assignBody = { ...payload, auth: signAssign(payload.task_id, node.node_id), ts: Date.now() };
     try {
       if (node.pull || !urlSafe) {
         const q = inbox.get(node.node_id) || [];
-        q.push({ ...payload, ts: Date.now() });
+        q.push(assignBody);
         inbox.set(node.node_id, q);
         queued.push({ node_id: node.node_id, pull: true });
       } else {
         await fetch(`${node.url}/assign`, { method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify(payload), signal: AbortSignal.timeout(60000) });
+          body: JSON.stringify(assignBody), signal: AbortSignal.timeout(60000) });
         pushed.push({ node_id: node.node_id, pull: false });
       }
     } catch (e) {
@@ -560,10 +573,11 @@ app.post("/v1/chat/completions", async (req, res) => {
     console.log(`[v1] targets=${targets.map(t=>t.node_id).join(",")} n_votes=${mm.n_votes}`);
     for (const node of targets) {
       try {
+        const assignBody = { ...payload, auth: signAssign(payload.task_id, node.node_id) };
         if (node.pull) {
-          const q = inbox.get(node.node_id) || []; q.push(payload); inbox.set(node.node_id, q);
+          const q = inbox.get(node.node_id) || []; q.push(assignBody); inbox.set(node.node_id, q);
         } else {
-          await fetch(`${node.url}/assign`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload), signal: AbortSignal.timeout(90000) });
+          await fetch(`${node.url}/assign`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(assignBody), signal: AbortSignal.timeout(90000) });
         }
         p.push(node.node_id);
       } catch (e) { /* 單一等 */ }
@@ -600,6 +614,13 @@ app.post("/v1/chat/completions", async (req, res) => {
 app.get("/tasks/poll", (req, res) => {
   const { node_id } = req.query;
   if (!node_id) return res.status(400).json({ ok: false, error: "node_id required" });
+  // P2 鎖 node：poll 嘅 token 必須屬於該 node 嘅 account（防偷人 inbox）
+  const t = req.get("x-swarm-token") || (req.swarmToken || "");
+  const acc = accountForToken(t);
+  const node = registry.get(String(node_id));
+  if (node && node.account && acc && node.account !== acc) {
+    return res.status(403).json({ ok: false, error: "唔係你嘅 node" });
+  }
   const q = inbox.get(String(node_id)) || [];
   if (q.length) inbox.set(String(node_id), []);
   res.json({ ok: true, tasks: q });
