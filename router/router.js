@@ -76,11 +76,13 @@ function creditBalance(account) {
   const row = db.prepare("SELECT balance FROM credits WHERE account=?").get(account);
   return row ? row.balance : 0;
 }
-// tokens → SWAI：input 用 RATE_IN，output 用 RATE_OUT（最少 1）
-function tokensToCredit(tokensIn, tokensOut) {
+// tokens → SWAI：input 用 RATE_IN，output 用 RATE_OUT（最少 1）。tierMult 需求收費倍率
+function tokensToCredit(tokensIn, tokensOut, tierMult = 1.0) {
   const sIn = Math.round((tokensIn || 0) / RATE_IN);
   const sOut = Math.round((tokensOut || 0) / RATE_OUT);
-  return Math.max(1, sIn + sOut);
+  // tier 只影響需求方收費：fast 用豪tier → 貴啲；normal → 平
+  const base = Math.max(1, sIn + sOut);
+  return Math.max(1, Math.round(base * tierMult));
 }
 function ledgerMint(account, opts = {}) {
   const { tokensIn = 0, tokensOut = 0, taskId = null, note = "", nodeId = "", kind = "vote" } = opts;
@@ -106,6 +108,27 @@ function accountForToken(t) {
   const u = findUserByToken ? findUserByToken(t) : null;
   return u ? u.email : null;
 }
+
+// ---- Logical model map (OpenAI gateway) ----
+// 對外 model ID → 派工群組 + tier 收費倍率
+const MODEL_MAP = {
+  "swarmai-fast":     { cap: ["reasoning", "analysis"], tier: ["S", "A"], n_votes: 3, label: "勁機優先（5090/4090/2080Ti），貴" },
+  "swarmai-normal":   { cap: ["reasoning", "math"], tier: ["B", "C"], n_votes: 3, label: "日常平價（3060/2060 及以下）" },
+  "swarmai-fast-vision": { cap: ["vision"], tier: ["S", "A", "B", "C"], n_votes: 1, vision: true, label: "Vision (qwen2.5-vl) 自動分流" },
+};
+// tier 收費倍率（需求方）同一緊 mint（供應方）用
+const TIER_RATE = { S: 1.8, A: 1.3, B: 1.0, C: 0.6 };       // 需求方收費
+const TIER_MINT = { S: 1.8, A: 1.3, B: 1.0, C: 0.7 };       // 供應方 mint
+// node → tier（由 gpu/vram 簡單判定；register 可帶 gpu 名）
+function nodeTier(n) {
+  const g = String(n.gpu || "").toLowerCase();
+  const v = n.vram || 0;
+  if (/5090|4090|3090/.test(g) || v >= 24) return "S";
+  if (/2080|2080ti|30\s?/i.test(g) || v >= 20) return "A";
+  if (v >= 10) return "B";
+  return "C";
+}
+function tierCharge(tier) { return TIER_RATE[tier] || 1.0; }
 
 // ---- Client portal: users (email login -> own API token) ----
 db.exec(`CREATE TABLE IF NOT EXISTS users(
@@ -149,8 +172,15 @@ app.use(express.json());
 app.use((req, res, next) => {
   const p0 = req.path;
   if (p0.startsWith("/portal")) return next();
-  const t = req.get("x-swarm-token");
+  let t = req.get("x-swarm-token");
+  if (!t) {
+    // OpenAI-compatible: Authorization: Bearer sk-swai-... or Bearer <token>
+    const auth = String(req.get("authorization") || "");
+    const m = auth.match(/^Bearer\s+(.+)$/i);
+    if (m) t = m[1].replace(/^sk-swai-/, "");
+  }
   if (t !== NET_TOKEN && !findUserByToken(t)) return res.status(401).json({ ok: false, error: "invalid x-swarm-token" });
+  req.swarmToken = t;
   next();
 });
 
@@ -170,15 +200,20 @@ function jaccard(a, b) {
 function matchCapabilities(required, candidates) {
   return candidates
     .filter(n => Array.isArray(n.capabilities))
-    .map(n => ({ node: n, score: jaccard(required, n.capabilities) }))
+    .map(n => {
+      const base = jaccard(required, n.capabilities);
+      const ratio = Math.max(1, Math.min(100, Number(n.share_ratio !== undefined ? n.share_ratio : 100)));
+      return { node: n, score: base * (ratio / 100) };   // ratio 低 → 派工優先度低（防蜂擁）
+    })
     .filter(x => x.score > 0)
     .sort((a, b) => b.score - a.score);
 }
 
 app.post("/register", (req, res) => {
-  const { node_id, capabilities, model, gpu, max_context, speed, url } = req.body;
+  const { node_id, capabilities, model, gpu, max_context, speed, share_ratio, url } = req.body;
   const n = registry.get(node_id) || { uptime_s: 0, last_status: null };
   Object.assign(n, { node_id, capabilities, model, gpu, max_context, speed, url, pull: !!req.body.pull });
+  n.share_ratio = Math.max(0, Math.min(100, Number(share_ratio !== undefined ? share_ratio : (n.share_ratio || 100))));
   const tk = req.get("x-swarm-token");
   n.account = accountForToken(tk) || n.account || SYSTEM_ACCOUNT;
   registry.set(node_id, n);
@@ -190,15 +225,27 @@ app.post("/register", (req, res) => {
 app.post("/status", (req, res) => {
   const { node_id, status, vram_used_gb, model_loaded, load, sleeping, ts } = req.body || {};
   let n = registry.get(node_id);
-  // 心跳但未註冊（router 重啟後）→ 自動補註冊（node_id 已知）
+  // 心跳但未註冊（router 重啟後）→ 自動補註冊（node_id 已知；心跳帶返完整資料）
   if (!n && node_id) {
-    n = { node_id, uptime_s: 0, last_status: null, capabilities: [], url: "" };
+    n = { node_id, uptime_s: 0, last_status: null, capabilities: req.body.capabilities || [], url: "" };
     const tk = req.get("x-swarm-token");
     n.account = accountForToken(tk) || SYSTEM_ACCOUNT;
     n.speed = req.body.speed || "";
+    n.gpu = req.body.gpu || "";
+    n.vram = req.body.vram || 0;
+    n.model = req.body.model || "";
+    n.max_context = req.body.max_context || 0;
+    n.share_ratio = Math.max(0, Math.min(100, Number(req.body.share_ratio !== undefined ? req.body.share_ratio : 100)));
     registry.set(node_id, n);
   }
+  // 心跳帶咗最新 hardware 資料 → 更新（唔淨 auto-register）
   if (n) {
+    if (req.body.gpu) n.gpu = req.body.gpu;
+    if (req.body.vram) n.vram = req.body.vram;
+    if (req.body.model) n.model = req.body.model;
+    if (req.body.speed) n.speed = req.body.speed;
+    if (req.body.url) n.url = req.body.url;
+    if (Array.isArray(req.body.capabilities) && req.body.capabilities.length) n.capabilities = req.body.capabilities;
     const nowMs = Date.now();
     const tsS = (ts && ts < 1e12) ? Number(ts) : (nowMs / 1000);
     const last = n.last_status;
@@ -209,10 +256,13 @@ app.post("/status", (req, res) => {
       const spd = parseFloat(n.speed) || 0;
       if (dtSec > 5 && spd > 0) {
         const acc = n.account || accountForToken(req.get("x-swarm-token")) || SYSTEM_ACCOUNT;
-        const tokens = Math.round(spd * dtSec);
-        const c = ledgerMint(acc, { tokensIn: 0, tokensOut: tokens, taskId: null, note: "idle_uptime", nodeId: node_id, kind: "idle" });
-        n.last_mint_idle = { ts: nowMs, tokens, credit: c };
-        console.log(`[idle] ${node_id} +${c} SWAI (${tokens} tokens, ${dtSec.toFixed(0)}s idle)`);
+        const ratio = Math.max(0, Math.min(100, Number(n.share_ratio !== undefined ? n.share_ratio : 100)));
+        const tokens = Math.round(spd * dtSec * (ratio / 100));
+        if (tokens > 0) {
+          const c = ledgerMint(acc, { tokensIn: 0, tokensOut: tokens, taskId: null, note: "idle_uptime", nodeId: node_id, kind: "idle" });
+          n.last_mint_idle = { ts: nowMs, tokens, credit: c };
+          console.log(`[idle] ${node_id} +${c} SWAI (${tokens} tokens, ${dtSec.toFixed(0)}s idle, ratio ${ratio}%)`);
+        }
       }
     }
     n.last_status = { status, vram_used_gb, model_loaded, load, sleeping, ts: tsS, __state: status, __tsMs: nowMs };
@@ -310,7 +360,16 @@ app.post("/ledger/burn", (req, res) => {
 });
 
 app.get("/credits/:account", (req, res) => {
-  res.json({ account: req.params.account, balance: creditBalance(req.params.account) });
+  const acc = req.params.account;
+  // 全部屬於呢個 account 嘅 node + 各自 ratio/speed（查詢時明列計法）
+  const nodes = [...registry.values()].filter(n => n.account === acc).map(n => ({
+    node_id: n.node_id, speed: parseFloat(n.speed) || 0, share_ratio: Math.max(0, Math.min(100, Number(n.share_ratio !== undefined ? n.share_ratio : 100))), speed_effective: (parseFloat(n.speed) || 0) * (Math.max(0, Math.min(100, Number(n.share_ratio !== undefined ? n.share_ratio : 100))) / 100),
+  }));
+  res.json({
+    account: acc, balance: creditBalance(acc),
+    nodes,
+    economy_note: "計法：idle 每分鐘 mint = (tok/s × 60 × share_ratio%) / 1000 SWAI；投票按實際 input/output tokens（in 5000t/SWAI, out 1000t/SWAI）。share_ratio 越低 → idle 賺得越少、派工優先度越低（防蜂擁）。",
+  });
 });
 
 app.get("/ledger/latest", (req, res) => {
@@ -331,7 +390,8 @@ setInterval(() => {
     if (n.uptime_s >= 60 && n.speed) {
       const mins = n.uptime_s / 60;
       const spd = parseFloat(n.speed) || 0;
-      const tokens = Math.round(spd * mins * 60);
+      const ratio = Math.max(0, Math.min(100, Number(n.share_ratio !== undefined ? n.share_ratio : 100)));
+      const tokens = Math.round(spd * mins * 60 * (ratio / 100));
       const acc = n.account || SYSTEM_ACCOUNT;
       if (tokens > 0) ledgerMint(acc, { tokensIn: 0, tokensOut: tokens, taskId: null, note: "idle_sweep", nodeId: n.node_id, kind: "idle" });
       n.uptime_s -= mins * 60;
@@ -394,6 +454,149 @@ app.get("/results/:task_id", (req, res) => {
   res.json({ task_id: req.params.task_id, done: rec ? rec.list.length : 0, results: rec ? rec.list : [] });
 });
 
+// ---- OpenAI-compatible gateway ----
+app.get("/v1/models", (req, res) => {
+  const list = Object.entries(MODEL_MAP).map(([id, m]) => ({
+    id, object: "model", created: Math.floor(Date.now() / 1000),
+    owned_by: "swarmai", description: m.label,
+    swarmai: { n_votes: m.n_votes, vision: !!m.vision, tiers: m.tier },
+  }));
+  res.json({ object: "list", data: list });
+});
+
+function detectImageInMessages(messages) {
+  for (const msg of messages || []) {
+    const c = msg.content;
+    if (typeof c === "string") { if (/data:image\/(png|jpeg|webp|gif);base64,/.test(c)) return true; continue; }
+    if (Array.isArray(c)) {
+      for (const part of c) {
+        if (part && (part.type === "image_url" || part.image_url)) return true;
+        if (part && part.type === "text" && /data:image\//.test(part.text || "")) return true;
+      }
+    }
+  }
+  return false;
+}
+function extractImagesFromMessages(messages, maxBytes = 4 * 1024 * 1024) {
+  // 抽返 base64 image → [{data, media_type}]（限制 size 防 DoS）
+  const imgs = [];
+  for (const msg of messages || []) {
+    const c = msg.content;
+    if (Array.isArray(c)) {
+      for (const part of c) {
+        if (part && (part.type === "image_url" || part.image_url)) {
+          let url = part.image_url?.url || part.url || "";
+          const m = url.match(/^data:(image\/\w+);base64,([A-Za-z0-9+/=]+)$/);
+          if (m && m[2].length <= maxBytes * 1.34) imgs.push({ data: m[2], media_type: m[1] });
+        } else if (part && part.type === "text") {
+          const m = (part.text || "").match(/data:(image\/\w+);base64,([A-Za-z0-9+/=]+)/);
+          if (m && m[2].length <= maxBytes * 1.34) imgs.push({ data: m[2], media_type: m[1] });
+        }
+      }
+    }
+  }
+  return imgs;
+}
+function messagesToPrompt(messages) {
+  const parts = [];
+  for (const msg of messages || []) {
+    const role = msg.role || "user";
+    const c = msg.content;
+    if (typeof c === "string") {
+      parts.push((role === "system" ? "SYSTEM: " : "USER: ") + c);
+    } else if (Array.isArray(c)) {
+      const texts = c.filter(p => p.type !== "image_url" && !p.image_url).map(p => p.text || "").join("\n");
+      if (texts) parts.push((role === "system" ? "SYSTEM: " : "USER: ") + texts);
+    }
+  }
+  return parts.join("\n\n");
+}
+
+app.post("/v1/chat/completions", async (req, res) => {
+  try {
+    const { model = "swarmai-normal", messages = [], temperature = 0.6, max_tokens = 512 } = req.body || {};
+    if (!Array.isArray(messages) || messages.length === 0)
+      return res.status(400).json({ error: { message: "messages required" }, type: "invalid_request_error" });
+    const reqTok = req.get("x-swarm-token") || (req.swarmToken || "");
+    const hasImage = detectImageInMessages(messages);
+    const modelKey = hasImage ? "swarmai-fast-vision" : (MODEL_MAP[model] ? model : "swarmai-normal");
+    const mm = MODEL_MAP[modelKey];
+    const prompt = messagesToPrompt(messages);
+    const images = hasImage ? extractImagesFromMessages(messages) : [];
+    const topTier = mm.tier && mm.tier.length ? mm.tier[0] : "B";
+
+    // tier 收費：fast 用 node tier 較高（如 S/A）→ 貴；normal → 平。選 max tier 計費（保守）
+    const reqAcc = reqTok ? accountForToken(reqTok) : null;
+    let estFee = 0;
+    if (reqAcc && reqTok !== NET_TOKEN) {
+      const estIn = Math.round(prompt.length / 3.5);
+      const estOut = max_tokens;
+      estFee = tokensToCredit(estIn, estOut, tierCharge(topTier));
+      const bal = creditBalance(reqAcc);
+      if (bal < estFee) return res.status(402).json({ error: { message: `SWAI 餘額不足 (balance ${bal}, need ${estFee})` }, type: "insufficient_balance" });
+      ledgerBurn(reqAcc, estFee, null, "v1_chat_estimate");
+    }
+
+    // 派工：揀符合 modelKey tier + cap 嘅 node
+    const wantedTiers = mm.tier;
+    let candidates = [...registry.values()].filter(n => n.account && wantedTiers.includes(nodeTier(n)));
+    console.log(`[v1] model=${modelKey} caps=${JSON.stringify(mm.cap)} tier=${JSON.stringify(mm.tier)} reg=${registry.size} cand=${candidates.map(c=>c.node_id+":"+nodeTier(c)).join(",")}`);
+    if (!candidates.length) {
+      candidates = [...registry.values()].filter(n => n.account); // fallback 平價
+      console.log(`[v1] fallback all-candidates=${candidates.map(c=>c.node_id).join(",")}`);
+    }
+    const sorted = matchCapabilities(mm.cap, candidates).sort((a,b) => (parseFloat(b.node.speed)||0) - (parseFloat(a.node.speed)||0));
+    console.log(`[v1] sorted=${sorted.map(s=>s.node.node_id+":"+s.score.toFixed(2)).join(",")}`);
+    const targets = sorted.slice(0, Math.max(1, mm.n_votes)).map(x => x.node);
+    if (!targets.length) {
+      if (reqAcc && reqTok !== NET_TOKEN) ledgerMint(reqAcc, { tokensIn: 0, tokensOut: Math.round(estFee * RATE_OUT), taskId: null, note: "v1_nocap_refund", nodeId: reqAcc, kind: "refund" });
+      return res.status(503).json({ error: { message: "no available worker" }, type: "server_error" });
+    }
+    const task_id = crypto.randomUUID();
+    const beacon_id = crypto.randomUUID();
+    const payload = { task_id, beacon_id, prompt, n_votes: mm.n_votes, temperature, image_data: images.length ? images : undefined };
+    resultsStore.set(task_id, { ts: Date.now(), list: [], est_fee: estFee, est_tokens_in: Math.round(prompt.length/3.5), est_tokens_out: max_tokens, assigned: new Set(targets.map(t=>t.node_id)) });
+    const p = [];
+    console.log(`[v1] targets=${targets.map(t=>t.node_id).join(",")} n_votes=${mm.n_votes}`);
+    for (const node of targets) {
+      try {
+        if (node.pull) {
+          const q = inbox.get(node.node_id) || []; q.push(payload); inbox.set(node.node_id, q);
+        } else {
+          await fetch(`${node.url}/assign`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload), signal: AbortSignal.timeout(90000) });
+        }
+        p.push(node.node_id);
+      } catch (e) { /* 單一等 */ }
+    }
+    // 等結果（上限 ~90s）
+    const deadline = Date.now() + 90000;
+    while (Date.now() < deadline && (!(resultsStore.get(task_id)?.list) || resultsStore.get(task_id).list.length < p.length)) {
+      await new Promise(r => setTimeout(r, 400));
+    }
+    const rec = resultsStore.get(task_id);
+    const tally = {};
+    for (const r of (rec?.list || [])) for (const v of (r.votes || [])) {
+      const ans = String(v.content || "").trim(); tally[ans] = (tally[ans] || 0) + (v.confidence || 0.5);
+    }
+    const [winner, conf] = Object.entries(tally).sort((a,b)=>b[1]-a[1])[0] || [null, 0];
+    // 精算：實際 tokens → 多退
+    const tin = (rec?.list || []).reduce((s,r)=>s+(r.tokens_in||0),0);
+    const tout = (rec?.list || []).reduce((s,r)=>s+(r.tokens_out||0),0);
+    if (reqAcc && reqTok !== NET_TOKEN && estFee > 0) {
+      const actual = tokensToCredit(tin, tout, tierCharge(topTier));
+      if (estFee > actual) { const d = estFee - actual; ledgerMint(reqAcc, { tokensIn: 0, tokensOut: Math.round(d * RATE_OUT), taskId, note: "v1_refund", nodeId: reqAcc, kind: "refund" }); }
+    }
+    res.json({
+      id: task_id, object: "chat.completion", created: Math.floor(Date.now()/1000), model: modelKey,
+      choices: [{ index: 0, message: { role: "assistant", content: winner || "" }, finish_reason: winner ? "stop" : "length" }],
+      usage: { prompt_tokens: Math.round(prompt.length/3.5), completion_tokens: tout, total_tokens: Math.round(prompt.length/3.5) + tout },
+      swarmai: { nodes: p, votes: (rec?.list || []).map(r => r.node_id), confidence: Number(conf.toFixed(3)), est_fee: estFee, image_routed: hasImage },
+    });
+  } catch (e) {
+    res.status(500).json({ error: { message: String(e.message || e).slice(0, 200) }, type: "server_error" });
+  }
+});
+
 app.get("/tasks/poll", (req, res) => {
   const { node_id } = req.query;
   if (!node_id) return res.status(400).json({ ok: false, error: "node_id required" });
@@ -433,7 +636,15 @@ app.get("/portal/me", (req, res) => {
   const u = findUserByToken(t);
   if (!u) return res.status(401).json({ ok: false, error: "invalid token" });
   const led = db.prepare("SELECT * FROM ledger WHERE account=? ORDER BY id DESC LIMIT 20").all(u.email);
-  res.json({ ok: true, email: u.email, node_id: u.node_id, account: u.email, balance: creditBalance(u.email), journal: led });
+  const nodes = [...registry.values()].filter(n => n.account === u.email).map(n => ({
+    node_id: n.node_id, speed: parseFloat(n.speed) || 0, share_ratio: Math.max(0, Math.min(100, Number(n.share_ratio !== undefined ? n.share_ratio : 100))),
+  }));
+  res.json({
+    ok: true, email: u.email, node_id: u.node_id, account: u.email, balance: creditBalance(u.email),
+    nodes,
+    economy_note: "計法：idle 1 分鐘 mint = (tok/s × 60 × share_ratio%) / 1000 SWAI；投票按實際 in/out tokens（in 5000t/SWAI、out 1000t/SWAI）。share_ratio=100 全產能；越低越少誘獎、派工優先度越低（防蜂擁）。",
+    journal: led
+  });
 });
 
 app.post("/portal/forgot", (req, res) => {
