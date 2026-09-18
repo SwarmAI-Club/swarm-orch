@@ -85,14 +85,21 @@ th{color:var(--acc)}
         <button style="width:auto;padding:9px 16px;margin:0" onclick="redeemCoupon()">兌換</button>
       </div>
       <div class="muted" id="coupon-status" style="margin-top:6px"></div>
+      <div class="muted" id="daily-q" style="margin-top:6px;font-size:.8rem"></div>
     </div>
     <div class="card"><div class="muted" style="margin-bottom:8px"><span data-i18n="p_led_lbl">最近分錄（mint/burn）</span></div><pre id="led"><span class="muted" data-i18n="p_loading">loading…</span></pre></div>
     <div class="card"><div class="muted" style="margin-bottom:8px"><span data-i18n="p_keys_lbl">🔑 分享 Keys（每把 Key 都會扣同一個 SWAI 池；可獨立 revoke）</span></div>
       <div style="display:flex;gap:8px;margin-bottom:8px">
         <input id="key-label" placeholder="例如 team-mate / office" style="flex:1">
+        <select id="key-scope" style="width:110px;padding:8px;border-radius:8px;border:1px solid #1f2937;background:#0b1220;color:var(--txt)">
+          <option value="full">full</option>
+          <option value="client">client</option>
+          <option value="worker">worker</option>
+        </select>
         <button style="width:auto;padding:9px 16px;margin:0" onclick="createKey()"><span data-i18n="p_btn_key">加 Key</span></button>
       </div>
-      <table><thead><tr><th><span data-i18n="p_th_label">label</span></th><th><span data-i18n="p_th_token">token</span></th><th></th></tr></thead><tbody id="keys"></tbody></table>
+      <div class="muted" style="font-size:.78rem;margin-bottom:8px">scope：client = 只可以落單（唔可以註冊 worker）；worker = 只可以掛機（唔可以落單燒 SWAI）；full = 兩者都得。唔同 key 扣埋同一個 SWAI 池。</div>
+      <table><thead><tr><th><span data-i18n="p_th_label">label</span></th><th><span data-i18n="p_th_token">token</span></th><th>scope</th><th>last used</th><th></th></tr></thead><tbody id="keys"></tbody></table>
     </div>
     <div class="card">
       <div class="muted" style="margin-bottom:8px">👤 User Profile — 可更新設定</div>
@@ -208,6 +215,7 @@ async function loadMe(){
     const d = await r.json();
     if(!d.ok){E('led').textContent=I('p_j_tok_invalid'); return;}
     E('bal').textContent = d.balance;
+    if (d.daily) E('daily-q').textContent = `今日 SWAI 支出 quota：${d.daily.used}/${d.daily.cap}（剩 ${d.daily.remaining}）`;
     E('led').textContent = JSON.stringify(d.journal, null, 1);
     // User Profile: nodes + rating + tier
     const rows = (d.nodes||[]).map(n=>{
@@ -246,12 +254,13 @@ async function loadKeys(){
     const r = await fetch('/portal/keys', {headers:{'x-swarm-token':window.__tok}});
     const d = await r.json();
     if(!d.ok){ E('keys').innerHTML=''; return; }
-    E('keys').innerHTML = (d.keys||[]).map(k=>`<tr><td>${k.label||'—'}</td><td><code>${k.token}</code></td><td><button style="width:auto;padding:5px 12px;margin:0" onclick="revokeKey('${k.token}')">revoke</button></td></tr>`).join('');
+    E('keys').innerHTML = (d.keys||[]).map(k=>`<tr><td>${k.label||'—'}</td><td><code>${k.token}</code></td><td>${k.scope||'full'}</td><td>${k.last_used_at?new Date(k.last_used_at).toLocaleString()+' · '+(k.last_ip||''):'未用過'}</td><td><button style="width:auto;padding:5px 12px;margin:0" onclick="revokeKey('${k.token}')">revoke</button></td></tr>`).join('');
   }catch(e){}
 }
 async function createKey(){
   const label = E('key-label').value || 'key';
-  const r = await fetch('/portal/keys/create', {method:'POST', headers:{'content-type':'application/json','x-swarm-token':window.__tok}, body: JSON.stringify({label})});
+  const scope = E('key-scope') ? E('key-scope').value : 'full';
+  const r = await fetch('/portal/keys/create', {method:'POST', headers:{'content-type':'application/json','x-swarm-token':window.__tok}, body: JSON.stringify({label, scope})});
   const d = await r.json();
   if(d.ok){ alert(I('p_j_newkey')+d.token); E('key-label').value=''; loadKeys(); } else alert(I('p_j_fail')+(d.error||''));
 }

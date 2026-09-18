@@ -97,6 +97,27 @@ function ledgerBurn(account, credit, taskId, note = "") {
     .run(Date.now(), "burn", account, "", taskId || null, 0, actual, "task", note);
   return actual;
 }
+// ---- Daily burn quota (防 key 被偷時一夜清空) ----
+const DAILY_BURN_CAP = Number(process.env.SWARM_DAILY_BURN_CAP || 2000); // 每 account 每日 SWAI burn 上限
+function dayKey(d = new Date()) { return d.toISOString().slice(0, 10); }
+function dailyUsed(account) {
+  const r = db.prepare("SELECT total FROM daily_usage WHERE account=? AND day=?").get(String(account), dayKey());
+  return r ? Number(r.total) || 0 : 0;
+}
+function dailyAdd(account, swai) {
+  db.prepare("INSERT INTO daily_usage(account, day, total) VALUES(?,?,?) ON CONFLICT(account, day) DO UPDATE SET total=total+?")
+    .run(String(account), dayKey(), swai, swai);
+}
+function dailyQuotaRemaining(account) {
+  return Math.max(0, DAILY_BURN_CAP - dailyUsed(account));
+}
+function ledgerBurnChecked(account, credit, taskId, note = "") {
+  const remaining = dailyQuotaRemaining(account);
+  if (credit > remaining) return { burned: ledgerBurn(account, remaining, taskId, note), remaining, capped: true, cap: DAILY_BURN_CAP };
+  const burned = ledgerBurn(account, credit, taskId, note);
+  dailyAdd(account, burned);
+  return { burned, remaining: remaining - burned, capped: false, cap: DAILY_BURN_CAP };
+}
 // token → account（歸戶 key：所有 worker/API 用同一 user token 都入同一 email account）
 function accountForToken(t) {
   if (!t) return null;
@@ -270,19 +291,70 @@ db.exec(`CREATE TABLE IF NOT EXISTS user_keys(
   email TEXT NOT NULL,
   token TEXT PRIMARY KEY,
   label TEXT,
-  created INTEGER
+  created INTEGER,
+  scope TEXT DEFAULT 'full',
+  last_used_at INTEGER,
+  last_ip TEXT
 )`);
 db.exec(`INSERT OR IGNORE INTO user_keys(email, token, label, created) SELECT email, token, 'primary', created FROM users`);
+(function migrateKeys() {
+  const cols = db.prepare("PRAGMA table_info(user_keys)").all().map(c => c.name);
+  const adds = [];
+  if (!cols.includes("scope")) adds.push("ADD COLUMN scope TEXT DEFAULT 'full'");
+  if (!cols.includes("last_used_at")) adds.push("ADD COLUMN last_used_at INTEGER");
+  if (!cols.includes("last_ip")) adds.push("ADD COLUMN last_ip TEXT");
+  for (const a of adds) db.exec(`ALTER TABLE user_keys ${a}`);
+  db.exec("UPDATE user_keys SET scope='full' WHERE scope IS NULL OR scope=''");
+})();
+db.exec(`CREATE TABLE IF NOT EXISTS node_owners(
+  node_id TEXT PRIMARY KEY,
+  account TEXT NOT NULL,
+  created INTEGER
+)`);
+db.exec(`CREATE TABLE IF NOT EXISTS daily_usage(
+  account TEXT NOT NULL,
+  day TEXT NOT NULL,
+  total INTEGER DEFAULT 0,
+  PRIMARY KEY(account, day)
+)`);
 function hashPass(p) { return crypto.scryptSync(String(p), "swaimail", 32).toString("hex"); }
 function mkNodeId(email) {
   return "client-" + String(email).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32);
 }
 function mkToken() { return "swai-" + crypto.randomBytes(16).toString("hex"); }
 function findUserByToken(t) {
-  return db.prepare("SELECT u.email, u.node_id, u.created AS acct_created, k.token, k.label FROM user_keys k JOIN users u ON u.email=k.email WHERE k.token=?").get(String(t));
+  return db.prepare("SELECT u.email, u.node_id, u.created AS acct_created, k.token, k.label, k.scope, k.last_used_at, k.last_ip FROM user_keys k JOIN users u ON u.email=k.email WHERE k.token=?").get(String(t));
 }
 function listKeysByToken(t) {
-  return db.prepare("SELECT token, label, created FROM user_keys WHERE email=(SELECT email FROM user_keys WHERE token=?)").all(String(t));
+  return db.prepare("SELECT token, label, created, scope, last_used_at, last_ip FROM user_keys WHERE email=(SELECT email FROM user_keys WHERE token=?)").all(String(t));
+}
+const keyLastTouch = new Map(); // token -> ts（touch debounce 60s）
+function touchKeyUse(t, ip) {
+  if (!t) return;
+  const now = Date.now();
+  if (now - (keyLastTouch.get(t) || 0) < 60 * 1000) return;
+  keyLastTouch.set(t, now);
+  try {
+    db.prepare("UPDATE user_keys SET last_used_at=?, last_ip=? WHERE token=?").run(now, String(ip || "").slice(0, 64), String(t));
+  } catch (e) {}
+}
+// key scope：full（全功能）| client（落單用，唔可以註冊 worker）| worker（掛機用，唔可以落單）
+function keyScopeOf(t) {
+  if (!t || t === NET_TOKEN) return "full";
+  const u = findUserByToken(t);
+  return (u && u.scope) || "full";
+}
+const SCOPE_WORKER_ENDPOINTS = new Set(["/register", "/status", "/tasks/poll", "/beacon", "/assign", "/result", "/vote"]);
+// node_id 綁定：node 屬於邊個 account（防搶註冊 / 冒充）
+function nodeOwner(node_id) {
+  return db.prepare("SELECT account, created FROM node_owners WHERE node_id=?").get(String(node_id));
+}
+function claimNode(node_id, account, force = false) {
+  const sql = force
+    ? "INSERT INTO node_owners(node_id, account, created) VALUES(?,?,?) ON CONFLICT(node_id) DO UPDATE SET account=excluded.account"
+    : "INSERT OR IGNORE INTO node_owners(node_id, account, created) VALUES(?,?,?)";
+  db.prepare(sql).run(String(node_id), account, Date.now());
+  return nodeOwner(node_id);
 }
 function userByEmail(e) { return db.prepare("SELECT * FROM users WHERE email=?").get(String(e).toLowerCase()); }
 
@@ -304,6 +376,18 @@ app.use((req, res, next) => {
   }
   if (t !== NET_TOKEN && !findUserByToken(t)) return res.status(401).json({ ok: false, error: "invalid x-swarm-token" });
   req.swarmToken = t;
+  touchKeyUse(t, req.connection?.remoteAddress || req.headers["x-forwarded-for"]);
+  // scope 執行：worker-only 保證 key 唔可以做消耗；client-only 保證 key 唔可以註冊/冒充 worker
+  if (t !== NET_TOKEN) {
+    const scope = keyScopeOf(t);
+    const p = req.path.split("?")[0];
+    if (scope === "client" && SCOPE_WORKER_ENDPOINTS.has(p)) {
+      return res.status(403).json({ ok: false, error: "此 key 係 client scope（唔可以做 worker 操作）" });
+    }
+    if (scope === "worker" && (p === "/task" || p === "/v1/chat/completions" || p === "/ledger/mint" || p === "/ledger/burn")) {
+      return res.status(403).json({ ok: false, error: "此 key 係 worker scope（唔可以落單/扣費）" });
+    }
+  }
   next();
 });
 
@@ -337,14 +421,20 @@ function matchCapabilities(required, candidates) {
 
 app.post("/register", (req, res) => {
   const { node_id, capabilities, model, gpu, max_context, speed, share_ratio, url, free } = req.body;
+  if (!node_id) return res.status(400).json({ ok: false, error: "node_id required" });
+  const tk = req.get("x-swarm-token");
+  const acc = accountForToken(tk) || SYSTEM_ACCOUNT;
+  // P2 綁定：node 只可以屬一個 account。若 node 已被其他 account 註冊 → 拒絕（防冒充）
+  const own = nodeOwner(node_id);
+  if (own && own.account !== acc) return res.status(403).json({ ok: false, error: `node ${node_id} 已註冊俾 ${own.account}` });
+  if (!own) claimNode(node_id, acc);
   const n = registry.get(node_id) || { uptime_s: 0, last_status: null };
   Object.assign(n, { node_id, capabilities, model, gpu, max_context, speed, url, pull: !!req.body.pull });
   n.share_ratio = Math.max(0, Math.min(100, Number(share_ratio !== undefined ? share_ratio : (n.share_ratio || 100))));
   // free：DB owner 設定優先（持久）；無則用 register flag
   if (nodeSettingFree(node_id)) { n.free = true; n.free_manual = true; }
   else if (!n.free_manual) n.free = !!free;   // free node：owner 設定優先（心跳/register 唔覆寫）
-  const tk = req.get("x-swarm-token");
-  n.account = accountForToken(tk) || n.account || SYSTEM_ACCOUNT;
+  n.account = acc;
   if (req.body.completion) {
     n.completion = req.body.completion;
     probeAbilities(req.body.completion).then(a => { n.abilities = a; if (a.ctx) n.max_context = a.ctx; }).catch(() => {});
@@ -358,11 +448,16 @@ app.post("/register", (req, res) => {
 app.post("/status", (req, res) => {
   const { node_id, status, vram_used_gb, model_loaded, load, sleeping, ts } = req.body || {};
   let n = registry.get(node_id);
+  const tk = req.get("x-swarm-token");
+  const acc = accountForToken(tk) || SYSTEM_ACCOUNT;
   // 心跳但未註冊（router 重啟後）→ 自動補註冊（node_id 已知；心跳帶返完整資料）
   if (!n && node_id) {
+    // P2 綁定：已有 owner 且唔係自己 → 心跳唔可以強搶呢個 node（防冒充）
+    const own = nodeOwner(node_id);
+    if (own && own.account !== acc) return res.status(403).json({ ok: false, error: `node ${node_id} 已註冊俾 ${own.account}` });
+    if (!own) claimNode(node_id, acc);
     n = { node_id, uptime_s: 0, last_status: null, capabilities: req.body.capabilities || [], url: "" };
-    const tk = req.get("x-swarm-token");
-    n.account = accountForToken(tk) || SYSTEM_ACCOUNT;
+    n.account = acc;
     n.speed = req.body.speed || "";
     n.gpu = req.body.gpu || "";
     n.vram = req.body.vram || 0;
@@ -576,7 +671,9 @@ app.post("/task", async (req, res) => {
     if (promoCode) { const r = applyPromoToFee(promoCode, fee); fee = r.fee; promoUsed = r.promo; }
     const bal = creditBalance(tOk);
     if (bal < fee) return res.status(402).json({ ok: false, error: "SWAI 餘額不足，唔夠出 task", balance: bal, fee, est_tokens_in: estIn, est_tokens_out: estOut });
-    ledgerBurn(tOk, fee, task_id, "task_estimate");
+    const qRem = dailyQuotaRemaining(tOk);
+    if (fee > qRem) return res.status(429).json({ ok: false, error: `今日 burn 上限已到 / 剩餘唔夠（每日上限 ${DAILY_BURN_CAP} SWAI，今日剩 ${qRem}）`, daily_cap: DAILY_BURN_CAP, daily_remaining: qRem, need: fee });
+    ledgerBurnChecked(tOk, fee, task_id, "task_estimate");
   }
   for (const { node, score } of dispatchList) {
     const urlSafe = new RegExp("^https?://(127\.0\.0\.1|100\.|localhost)").test(node.url || "");
@@ -729,7 +826,9 @@ app.post("/v1/chat/completions", async (req, res) => {
       if (promoCode) { const r = applyPromoToFee(promoCode, estFee); estFee = r.fee; promoUsed = r.promo; }
       const bal = creditBalance(reqAcc);
       if (bal < estFee) return res.status(402).json({ error: { message: `SWAI 餘額不足 (balance ${bal}, need ${estFee})` }, type: "insufficient_balance" });
-      ledgerBurn(reqAcc, estFee, null, "v1_chat_estimate");
+      const qRem = dailyQuotaRemaining(reqAcc);
+      if (estFee > qRem) return res.status(429).json({ error: { message: `今日 burn 上限已到（每日上限 ${DAILY_BURN_CAP} SWAI，今日剩 ${qRem}）`, type: "daily_quota_exceeded" }, error_type: "daily_quota_exceeded", daily_cap: DAILY_BURN_CAP, daily_remaining: qRem });
+      ledgerBurnChecked(reqAcc, estFee, null, "v1_chat_estimate");
     }
     const task_id = crypto.randomUUID();
     const beacon_id = crypto.randomUUID();
@@ -865,8 +964,9 @@ app.post("/portal/signup", (req, res) => {
   const node_id = mkNodeId(e);
   db.prepare("INSERT INTO users(email,pass_hash,token,node_id,created) VALUES(?,?,?,?,?)")
     .run(e, hashPass(password), token, node_id, Date.now());
-  db.prepare("INSERT INTO user_keys(email, token, label, created) VALUES(?,?,?,?)")
-    .run(e, token, "primary", Date.now());
+  db.prepare("INSERT INTO user_keys(email, token, label, created, scope) VALUES(?,?,?,?,?)")
+    .run(e, token, "primary", Date.now(), "full");
+  claimNode(node_id, e);
   // Pilot 開戶送分（試玩額）
   if (SIGNUP_BONUS > 0) {
     ledgerMint(e, { tokensIn: 0, tokensOut: SIGNUP_BONUS * RATE_OUT, taskId: null, note: "welcome_bonus", nodeId: node_id, kind: "manual" });
@@ -896,6 +996,8 @@ app.get("/portal/me", (req, res) => {
   res.json({
     ok: true, email: u.email, node_id: u.node_id, account: u.email, balance: creditBalance(u.email),
     profile: prof,
+    keys: listKeysByToken(t).map(k => ({ token: k.token, label: k.label, scope: k.scope || "full", last_used_at: k.last_used_at, last_ip: k.last_ip })),
+    daily: { cap: DAILY_BURN_CAP, used: dailyUsed(u.email), remaining: dailyQuotaRemaining(u.email) },
     nodes,
     economy_note: "計法：idle 1 分鐘 mint = (tok/s × 60 × share_ratio%) / 1000 SWAI；投票按實際 in/out tokens（in 5000t/SWAI、out 1000t/SWAI）。share_ratio=100 全產能；越低越少誘獎、派工優先度越低（防蜂擁）。",
     journal: led
@@ -993,7 +1095,7 @@ app.get("/portal/keys", (req, res) => {
   const t = req.get("x-swarm-token");
   const u = findUserByToken(t);
   if (!u) return res.status(401).json({ ok: false, error: "invalid token" });
-  res.json({ ok: true, email: u.email, keys: listKeysByToken(t).map(k => ({ token: k.token, label: k.label, created: k.created })) });
+  res.json({ ok: true, email: u.email, daily_cap: DAILY_BURN_CAP, keys: listKeysByToken(t).map(k => ({ token: k.token, label: k.label, created: k.created, scope: k.scope || "full", last_used_at: k.last_used_at, last_ip: k.last_ip })) });
 });
 
 app.post("/portal/keys/create", (req, res) => {
@@ -1001,9 +1103,11 @@ app.post("/portal/keys/create", (req, res) => {
   const u = findUserByToken(t);
   if (!u) return res.status(401).json({ ok: false, error: "invalid token" });
   const label = String((req.body || {}).label || "key").slice(0, 40);
+  const scope = String((req.body || {}).scope || "full");
+  if (!["full", "client", "worker"].includes(scope)) return res.status(400).json({ ok: false, error: "scope 必須係 full/client/worker" });
   const ntok = mkToken();
-  db.prepare("INSERT INTO user_keys(email, token, label, created) VALUES(?,?,?,?)").run(u.email, ntok, label, Date.now());
-  res.json({ ok: true, token: ntok, label });
+  db.prepare("INSERT INTO user_keys(email, token, label, created, scope) VALUES(?,?,?,?,?)").run(u.email, ntok, label, Date.now(), scope);
+  res.json({ ok: true, token: ntok, label, scope });
 });
 
 app.post("/portal/keys/revoke", (req, res) => {
