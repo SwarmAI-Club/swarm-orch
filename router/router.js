@@ -190,6 +190,14 @@ db.exec(`CREATE TABLE IF NOT EXISTS promotions(
   used INTEGER DEFAULT 0
 )`);
 const SIGNUP_BONUS = Number(process.env.SWARM_SIGNUP_BONUS || 50); // Pilot: 開戶送分
+// per-node owner settings（free 持久化）
+db.exec(`CREATE TABLE IF NOT EXISTS node_settings(
+  node_id TEXT PRIMARY KEY,
+  email TEXT NOT NULL,
+  free INTEGER DEFAULT 0,
+  updated INTEGER
+)`);
+function nodeSettingFree(nodeId) { return (db.prepare("SELECT free FROM node_settings WHERE node_id=?").get(nodeId) || {}).free || 0; }
 function promoValid(code) {
   if (!code) return null;
   const row = db.prepare("SELECT * FROM promotions WHERE code=?").get(String(code));
@@ -273,7 +281,9 @@ app.post("/register", (req, res) => {
   const n = registry.get(node_id) || { uptime_s: 0, last_status: null };
   Object.assign(n, { node_id, capabilities, model, gpu, max_context, speed, url, pull: !!req.body.pull });
   n.share_ratio = Math.max(0, Math.min(100, Number(share_ratio !== undefined ? share_ratio : (n.share_ratio || 100))));
-  if (!n.free_manual) n.free = !!free;   // free node：owner 設定優先（心跳/register 唔覆寫）
+  // free：DB owner 設定優先（持久）；無則用 register flag
+  if (nodeSettingFree(node_id)) { n.free = true; n.free_manual = true; }
+  else if (!n.free_manual) n.free = !!free;   // free node：owner 設定優先（心跳/register 唔覆寫）
   const tk = req.get("x-swarm-token");
   n.account = accountForToken(tk) || n.account || SYSTEM_ACCOUNT;
   registry.set(node_id, n);
@@ -308,6 +318,7 @@ app.post("/status", (req, res) => {
     if (req.body.url) n.url = req.body.url;
     if (req.body.max_context) n.max_context = req.body.max_context;
     if (req.body.free !== undefined && !n.free_manual) n.free = !!req.body.free;
+    if (nodeSettingFree(node_id)) { n.free = true; n.free_manual = true; }
     if (Array.isArray(req.body.capabilities) && req.body.capabilities.length) n.capabilities = req.body.capabilities;
     const nowMs = Date.now();
     const tsS = (ts && ts < 1e12) ? Number(ts) : (nowMs / 1000);
@@ -488,7 +499,7 @@ app.post("/task", async (req, res) => {
   const reqTok = req.get("x-swarm-token");
   const tOk = reqTok ? accountForToken(reqTok) : null;
   const dispatchList = matches.slice(0, (req.body.max_targets || CONFIG.max_beacon_targets || 5));
-  const targetsAllFree = dispatchList.length > 0 && dispatchList.every(m => m.node.free);
+  const targetsAllFree = dispatchList.length > 0 && dispatchList.some(m => m.node.free);
   if (tOk && reqTok !== NET_TOKEN && !targetsAllFree) {
     const estIn = Math.round(prompt.length / EST_CHARS_PER_TOKEN);
     const estOut = n_votes * 512; // 預估 output (n_predict 多數情況)
@@ -601,22 +612,25 @@ app.post("/v1/chat/completions", async (req, res) => {
     let estFee = 0;
     let freeServed = false;
 
-    // 派工：揀符合 modelKey tier + cap 嘅 node（freeOnly → 只揀 free node）
+    // 派工：揀符合 modelKey tier + cap 嘅 node
+    //  freeOnly → 只揀 free node；其他 model（fast/normal）免費 node 都入選（高 grade 優先）
     const wantedTiers = mm.tier;
-    let candidates = [...registry.values()].filter(n => n.account && wantedTiers.includes(nodeTier(n)) && (!mm.freeOnly || n.free));
-    console.log(`[v1] model=${modelKey} caps=${JSON.stringify(mm.cap)} tier=${JSON.stringify(mm.tier)} reg=${registry.size} cand=${candidates.map(c=>c.node_id+":"+nodeTier(c)).join(",")}`);
+    let candidates = [...registry.values()].filter(n => n.account && (mm.freeOnly ? n.free : (wantedTiers.includes(nodeTier(n)) || n.free)));
+    console.log(`[v1] model=${modelKey} caps=${JSON.stringify(mm.cap)} tier=${JSON.stringify(mm.tier)} reg=${registry.size} cand=${candidates.map(c=>c.node_id+":"+nodeTier(c)+(c.free?"(F)":"")).join(",")}`);
     if (!candidates.length && !mm.freeOnly) {
       candidates = [...registry.values()].filter(n => n.account); // fallback 平價
       console.log(`[v1] fallback all-candidates=${candidates.map(c=>c.node_id).join(",")}`);
     }
-    const sorted = matchCapabilities(mm.cap, candidates).sort((a,b) => (parseFloat(b.node.speed)||0) - (parseFloat(a.node.speed)||0));
+    // 排序：score（含 rating/grade × share_ratio）為主，speed 只做 tiebreak
+    const sorted = matchCapabilities(mm.cap, candidates).sort((a,b) =>
+      b.score - a.score || (parseFloat(b.node.speed)||0) - (parseFloat(a.node.speed)||0));
     console.log(`[v1] sorted=${sorted.map(s=>s.node.node_id+":"+s.score.toFixed(2)).join(",")}`);
     const targets = sorted.slice(0, Math.max(1, mm.n_votes)).map(x => x.node);
     if (!targets.length) {
       return res.status(503).json({ error: { message: "no available worker" }, type: "server_error" });
     }
-    // 收費決定：全 free（或 freeOnly model）→ 免費（唔 burn）· 有付費 node → 正常估費 burn
-    freeServed = mm.freeOnly || (targets.length > 0 && targets.every(t => t.free));
+    // 收費決定：任何 free node 參與（或有 freeOnly model）→ 免費（唔 burn）；全部付費 node → 正常估費 burn
+    freeServed = mm.freeOnly || targets.some(t => t.free);
     if (reqAcc && reqTok !== NET_TOKEN && !freeServed) {
       const estIn = Math.round(prompt.length / 3.5);
       const estOut = max_tokens;
@@ -766,6 +780,8 @@ app.post("/portal/node_toggle", (req, res) => {
   if (n.account !== u.email) return res.status(403).json({ ok: false, error: "唔係你嘅 node" });
   n.free = !!free;
   n.free_manual = true;   // owner 設定優先，心跳唔覆寫
+  db.prepare("INSERT INTO node_settings(node_id,email,free,updated) VALUES(?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET free=?, updated=?")
+    .run(String(node_id), u.email, n.free ? 1 : 0, Date.now(), n.free ? 1 : 0, Date.now());
   res.json({ ok: true, node_id, free: n.free });
 });
 
