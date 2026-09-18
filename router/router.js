@@ -800,7 +800,7 @@ app.post("/v1/chat/completions", async (req, res) => {
     const tout = (rec?.list || []).reduce((s,r)=>s+(r.tokens_out||0),0);
     if (reqAcc && reqTok !== NET_TOKEN && estFee > 0) {
       const actual = tokensToCredit(tin, tout, tierCharge(topTier));
-      if (estFee > actual) { const d = estFee - actual; ledgerMint(reqAcc, { tokensIn: 0, tokensOut: Math.round(d * RATE_OUT), taskId, note: "v1_refund", nodeId: reqAcc, kind: "refund" }); }
+      if (estFee > actual) { const d = estFee - actual; ledgerMint(reqAcc, { tokensIn: 0, tokensOut: Math.round(d * RATE_OUT), taskId: task_id, note: "v1_refund", nodeId: reqAcc, kind: "refund" }); }
     }
 
     const message = { role: "assistant", content: winner || "" };
