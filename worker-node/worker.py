@@ -174,6 +174,9 @@ class Worker:
                 "reason": "capability_match" if accepted else "no_capability"}
 
     def on_assign(self, body):
+        adapter_kind = body.get("adapter") or (self.args.adapter or "")
+        if adapter_kind:
+            return self.on_adapter(adapter_kind, body)
         chat_messages = body.get("chat_messages")
         tools = body.get("tools")
         max_tokens = body.get("max_tokens")
@@ -219,6 +222,64 @@ class Worker:
         except Exception as e:
             print(f"[worker] result post FAIL: {e}", file=sys.stderr)
         return {"ok": True, "votes": len(votes), "node_id": self.args.node_id}
+
+    # ---- Specialty adapter（SD-WebUI / ComfyUI / Wan 等非 llama-server 服務）----
+    # adapter 定義：name -> {cap, default_endpoint, call(prompt, opts) -> {images:[data_uri], units}}
+    def on_adapter(self, kind, body):
+        t0 = time.time()
+        prompt = body.get("prompt", "")
+        n = int(body.get("n", 1) or body.get("n_votes", 1) or 1)
+        size = body.get("size", "512")
+        out = {"images": [], "units": n}
+        try:
+            if kind == "image":
+                out = self.adapter_image(prompt, n=n, size=size)
+            elif kind == "video":
+                out = self.adapter_video(prompt, n=n)
+            else:
+                raise RuntimeError(f"unknown adapter: {kind}")
+        except Exception as e:
+            print(f"[adapter:{kind}] FAIL: {e}", file=sys.stderr)
+            out = {"images": [], "units": 0, "error": str(e)[:200]}
+        payload = {
+            "type": "task_result", "task_id": body.get("task_id"),
+            "node_id": self.args.node_id,
+            "votes": [{"content": out.get("error") or f"{kind} OK ({len(out.get('images', []))} 張)", "confidence": 0.9, "reasoning": ""}],
+            "images": out.get("images", []),
+            "units": out.get("units", 0),
+            "duration_ms": int((time.time() - t0) * 1000),
+            "tokens_in": 0, "tokens_out": 0,
+        }
+        print(f"[adapter:{kind}] result {len(payload['images'])} imgs / {payload['units']} units / err={out.get('error')!r}", file=sys.stderr, flush=True)
+        try:
+            requests.post(self.args.router.rstrip("/") + "/result", json=payload, headers=_headers(self.args), timeout=120)
+        except Exception as e:
+            print(f"[worker] adapter result post FAIL: {e}", file=sys.stderr)
+        return {"ok": True, "adapter": kind, "images": len(out.get("images", [])), "node_id": self.args.node_id}
+
+    def adapter_image(self, prompt, n=1, size="512"):
+        """SD-WebUI txt2img adapter。endpoint 可容 SD_API_URL 或 SWARM_COMPLETION 係 sd-api 址。
+        回傳 {images: [data_uri…], units}：每張 = 1 unit。"""
+        url = os.environ.get("SD_API_URL", "").rstrip("/")
+        if not url and self.args.completion:
+            url = str(self.args.completion).rstrip("/")
+        if not url:
+            raise RuntimeError("image adapter 需要 SD_API_URL（例如 http://127.0.0.1:7860/sdapi/v1）")
+        w, h = (size.lower()=="512" and (512,512)) or (size.lower()=="1024" and (1024,1024)) or (768,768)
+        body = {"prompt": prompt, "negative_prompt": "", "steps": 20, "width": w, "height": h, "batch_size": int(n), "cfg_scale": 7}
+        r = requests.post(url + "/txt2img", json=body, timeout=300)
+        r.raise_for_status()
+        j = r.json()
+        imgs = [f"data:image/png;base64,{b}" for b in (j.get("images") or [])]
+        return {"images": imgs, "units": len(imgs) or int(n)}
+
+    def adapter_video(self, prompt, n=1):
+        """Wan/ComfyUI 視訊 adapter（示範 stub）。真實部署時改為 call ComfyUI workflow API，
+        回傳 {images: [video_data_uri…], units}：每條 = 1 unit。"""
+        url = os.environ.get("WAN_API_URL", "").rstrip("/")
+        if not url:
+            raise RuntimeError("video adapter 需要 WAN_API_URL（ComfyUI workflow endpoint）—— 而家係 stub")
+        raise RuntimeError("Wan adapter 未實作（準備 NYI）")
 
     def heartbeat_once(self, sleeping=False):
         try:
@@ -301,7 +362,9 @@ def _poll_loop(worker):
                     print("[worker] poll task auth fail, skip", file=sys.stderr)
                     continue
                 worker.on_assign({"task_id": t["task_id"], "beacon_id": t.get("beacon_id"),
-                                  "prompt": t.get("prompt", ""), "n_votes": t.get("n_votes", 3),
+                                  "adapter": t.get("adapter", ""),
+                                  "prompt": t.get("prompt", ""), "n": t.get("n"), "size": t.get("size"),
+                                  "n_votes": t.get("n_votes", 3),
                                   "temperature": t.get("temperature", 0.6),
                                   "chat_messages": t.get("chat_messages"),
                                   "tools": t.get("tools"), "tool_choice": t.get("tool_choice"),
@@ -318,7 +381,9 @@ def main():
     ap.add_argument("--token", default=os.environ.get("SWARM_API_TOKEN"), help="X-Swarm-Token（router 認證；必填）")
     ap.add_argument("--router-secret", default=os.environ.get("SWARM_ROUTER_SECRET", ""), help="router 派工簽名 secret（缺省用 token）")
     ap.add_argument("--node-id", default=os.environ.get("HOSTNAME", "node-" + uuid.uuid4().hex[:6]))
-    ap.add_argument("--completion", default=os.environ.get("SWARM_COMPLETION"), help="llama-server /completion URL")
+    ap.add_argument("--completion", default=os.environ.get("SWARM_COMPLETION"), help="llama-server /completion URL (adapter 用 SD_API_URL/WAN_API_URL)")
+    ap.add_argument("--adapter", default=os.environ.get("SWARM_ADAPTER", ""), choices=["", "image", "video"],
+                    help="specialty adapter: image(SD-WebUI)/video(Wan)。用 adapter 時 --completion 可係 SD/ComfyUI API 址")
     ap.add_argument("--capabilities", nargs="*", default=["reasoning", "math", "analysis"])
     ap.add_argument("--model", default=os.environ.get("SWARM_MODEL", "unknown"))
     ap.add_argument("--gpu", default=os.environ.get("SWARM_GPU", ""))
@@ -335,8 +400,8 @@ def main():
     ap.add_argument("--heartbeat", type=int, default=0, help="heartbeat interval sec (0=off)")
     ap.add_argument("--pull", action="store_true", help="pull-mode: 唔使 inbound，poll router /tasks/poll 攞任務（NAT 後安全）")
     args = ap.parse_args()
-    if not args.completion:
-        print("--completion 必填（llama-server /completion URL）或 用 SWARM_COMPLETION env", file=sys.stderr)
+    if not args.adapter and not args.completion:
+        print("--completion 必填（llama-server /completion URL）或 用 SWARM_COMPLETION env；adapter mode（image/video）可改 SD_API_URL/WAN_API_URL", file=sys.stderr)
         sys.exit(1)
     if not args.token:
         print("--token / SWARM_API_TOKEN 必填（router 認證）", file=sys.stderr)

@@ -13,6 +13,8 @@ const NET_TOKEN = process.env.SWARM_API_TOKEN || "dev-insecure-token"; // REQUIR
 const SWAI_TOKENS = Number(process.env.SWAI_TOKENS || 10000);      // 1 SWAI = N tokens (input/output 基底)
 const RATE_IN = Number(process.env.SWAI_RATE_IN || 5000);          // 1 SWAI charges per N INPUT tokens  (較平)
 const RATE_OUT = Number(process.env.SWAI_RATE_OUT || 1000);        // 1 SWAI charges per N OUTPUT tokens (貴 5x)
+const IMAGE_UNIT_PRICE = Number(process.env.SWAI_IMAGE_UNIT_PRICE || 20);   // image-gen 每 job unit→SWAI
+const VIDEO_UNIT_PRICE = Number(process.env.SWAI_VIDEO_UNIT_PRICE || 80);   // video-gen 每 job unit→SWAI
 const SYSTEM_ACCOUNT = "^system^";                                  // NET_TOKEN 用 account（monitor/admin）
 
 // SMTP (forgot-password) — env 或 swarm-support-bot.env
@@ -49,6 +51,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS ledger(
   credit INTEGER NOT NULL,
   tokens_in INTEGER DEFAULT 0,
   tokens_out INTEGER DEFAULT 0,
+  units INTEGER DEFAULT 0,
   kind TEXT,
   note TEXT
 )`);
@@ -68,6 +71,7 @@ if (!oldCredits && db.prepare("SELECT COUNT(*) c FROM credits").get().c > 0) {
   const adds = [];
   if (!cols.includes("tokens_in")) adds.push("ADD COLUMN tokens_in INTEGER DEFAULT 0");
   if (!cols.includes("tokens_out")) adds.push("ADD COLUMN tokens_out INTEGER DEFAULT 0");
+  if (!cols.includes("units")) adds.push("ADD COLUMN units INTEGER DEFAULT 0");
   if (!cols.includes("kind")) adds.push("ADD COLUMN kind TEXT");
   if (!cols.includes("account")) adds.push("ADD COLUMN account TEXT");
   for (const a of adds) db.exec(`ALTER TABLE ledger ${a}`);
@@ -81,19 +85,20 @@ function tokensToCredit(tokensIn, tokensOut, tierMult = 1.0) {
   return Math.max(1, Math.round(base * tierMult));
 }
 function ledgerMint(account, opts = {}) {
-  const { tokensIn = 0, tokensOut = 0, taskId = null, note = "", nodeId = "", kind = "vote" } = opts;
-  const credit = tokensToCredit(tokensIn, tokensOut);
+  const { tokensIn = 0, tokensOut = 0, units = 0, unitPrice = 0, taskId = null, note = "", nodeId = "", kind = "vote" } = opts;
+  // specialty unit 計費：units × unitPrice（如 image-gen 每張 N SWAI）；text/vision 照 token
+  const credit = units > 0 ? Math.max(1, Math.round(units * unitPrice)) : tokensToCredit(tokensIn, tokensOut);
   db.prepare("INSERT INTO credits(account,balance) VALUES(?,?) ON CONFLICT(account) DO UPDATE SET balance=balance+?")
     .run(account, credit, credit);
-  db.prepare("INSERT INTO ledger(ts,type,account,node_id,task_id,gpu_min,credit,tokens_in,tokens_out,kind,note) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
-    .run(Date.now(), "mint", account, nodeId || "", taskId || null, 0, credit, tokensIn || 0, tokensOut || 0, kind || "vote", note);
+  db.prepare("INSERT INTO ledger(ts,type,account,node_id,task_id,gpu_min,credit,tokens_in,tokens_out,units,kind,note) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")
+    .run(Date.now(), "mint", account, nodeId || "", taskId || null, 0, credit, tokensIn || 0, tokensOut || 0, units || 0, kind || "vote", note);
   return credit;
 }
 function ledgerBurn(account, credit, taskId, note = "") {
   const bal = creditBalance(account);
   const actual = Math.min(credit, bal);
   db.prepare("UPDATE credits SET balance=balance-? WHERE account=?").run(actual, account);
-  db.prepare("INSERT INTO ledger(ts,type,account,node_id,task_id,gpu_min,credit,tokens_in,tokens_out,kind,note) VALUES(?,?,?,?,?,?,?,0,0,?,?)")
+  db.prepare("INSERT INTO ledger(ts,type,account,node_id,task_id,gpu_min,credit,tokens_in,tokens_out,units,kind,note) VALUES(?,?,?,?,?,?,?,0,0,0,?,?)")
     .run(Date.now(), "burn", account, "", taskId || null, 0, actual, "task", note);
   return actual;
 }
@@ -118,6 +123,10 @@ function ledgerBurnChecked(account, credit, taskId, note = "") {
   dailyAdd(account, burned);
   return { burned, remaining: remaining - burned, capped: false, cap: DAILY_BURN_CAP };
 }
+// specialty（image/video）落單計費：單位 × 單位價
+function specialtyFee(units, unitPrice) {
+  return Math.max(1, Math.round(units * unitPrice));
+}
 // token → account（歸戶 key：所有 worker/API 用同一 user token 都入同一 email account）
 function accountForToken(t) {
   if (!t) return null;
@@ -133,6 +142,8 @@ const MODEL_MAP = {
   "swarmai-normal":   { cap: ["reasoning", "math"], tier: ["B", "C"], n_votes: 3, label: "日常平價（3060/2060 及以下）" },
   "swarmai-vision": { cap: ["vision"], tier: ["S", "A", "B", "C"], n_votes: 1, vision: true, hidden: true, label: "Vision (auto-route, 唔對外顯示)" },
   "swarmai-free":     { cap: ["reasoning", "math", "analysis"], tier: ["S", "A", "B", "C"], n_votes: 3, freeOnly: true, label: "免費 node（自由分享）——唔扣費" },
+  "swarmai-image":    { cap: ["image-gen"], tier: ["A", "B", "C"], n_votes: 1, unit: true, unitPer: "job", unitPrice: IMAGE_UNIT_PRICE, max_units: 4, label: "圖像生成（SD-WebUI/ComfyUI adapter）——每張按 unit 計" },
+  "swarmai-video":    { cap: ["video-gen"], tier: ["A", "B", "C"], n_votes: 1, unit: true, unitPer: "job", unitPrice: VIDEO_UNIT_PRICE, max_units: 8, label: "視訊生成（Wan adapter）——每條按 unit 計" },
 };
 // tier 收費倍率（需求方）同一緊 mint（供應方）用
 const TIER_RATE = { S: 1.8, A: 1.3, B: 1.0, C: 0.6 };       // 需求方收費
@@ -561,13 +572,13 @@ app.post("/beacon", async (req, res) => {
 });
 
 app.post("/result", (req, res) => {
-  const { task_id, node_id, votes, duration_ms, tokens_in, tokens_out } = req.body || {};
+  const { task_id, node_id, votes, duration_ms, tokens_in, tokens_out, images, units } = req.body || {};
   if (!task_id || !node_id) return res.status(400).json({ ok: false, error: "task_id&node_id required" });
   const rec = resultsStore.get(task_id);
   // P2 防偽：task 必須有派過俾呢個 node（assigned set）先收 result
   if (!rec || !rec.assigned || !rec.assigned.has(node_id))
     return res.status(403).json({ ok: false, error: "task 未指派俾呢個 node" });
-  rec.list.push({ node_id, votes: votes || [], duration_ms: duration_ms || 0, tokens_in: tokens_in || 0, tokens_out: tokens_out || 0 });
+  rec.list.push({ node_id, votes: votes || [], duration_ms: duration_ms || 0, tokens_in: tokens_in || 0, tokens_out: tokens_out || 0, images: images || [], units: units || 0 });
   resultsStore.set(task_id, rec);
   res.json({ ok: true, task_id, results: rec.list.length });
 });
@@ -961,6 +972,77 @@ app.post("/v1/chat/completions", async (req, res) => {
     chunk({ ...base, choices: [], usage: { prompt_tokens: Math.round((prompt.length || 1000)/3.5), completion_tokens: tout, total_tokens: Math.round((prompt.length || 1000)/3.5) + tout } });
     res.write("data: [DONE]\n\n");
     res.end();
+  } catch (e) {
+    res.status(500).json({ error: { message: String(e.message || e).slice(0, 200) }, type: "server_error" });
+  }
+});
+
+// ---- Specialty gateway: 圖像生成（SD-WebUI/ComfyUI 等 image-gen worker）----
+app.post("/v1/images/generations", async (req, res) => {
+  try {
+    const { model = "swarmai-image", prompt = "", n = 1, size = "512", response_format = "b64_json" } = req.body || {};
+    if (!prompt) return res.status(400).json({ error: { message: "prompt required" }, type: "invalid_request_error" });
+    const mm = MODEL_MAP[model] || MODEL_MAP["swarmai-image"];
+    if (!mm.unit) return res.status(400).json({ error: { message: `model ${model} 唔係影像生成`, type: "invalid_request_error" } });
+    const units = Math.max(1, Math.min(mm.max_units || 4, Number(n) || 1));
+    const reqTok = req.get("x-swarm-token") || (req.swarmToken || "");
+    const reqAcc = reqTok ? accountForToken(reqTok) : null;
+    const fee = specialtyFee(units, mm.unitPrice);
+    let freeServed = false;
+    // 派工：只揀有 image-gen cap 嘅 node
+    let candidates = [...registry.values()].filter(n => n.account && (n.capabilities || []).includes("image-gen"));
+    console.log(`[img] model=${model} units=${units} prompt="${prompt.slice(0,40)}" cand=${candidates.map(c=>c.node_id).join(",")}`);
+    // free node 只係可選 bonus；唔做 freeOnly——image 要收費（成本唔細）
+    if (!candidates.length) return res.status(503).json({ error: { message: "no image worker available（未有 image-gen node）", type: "server_error" } });
+    const sorted = matchCapabilities(mm.cap, candidates).sort((a,b) => b.score - a.score);
+    const target = sorted[0].node;
+    let estFee = 0, promoUsed = null;
+    if (reqAcc && reqTok !== NET_TOKEN && !target.free) {
+      estFee = fee;
+      const promoCode = promoFromReq(req);
+      if (promoCode) { const r2 = applyPromoToFee(promoCode, estFee); estFee = r2.fee; promoUsed = r2.promo; }
+      const bal = creditBalance(reqAcc);
+      if (bal < estFee) return res.status(402).json({ error: { message: `SWAI 餘額不足 (balance ${bal}, need ${estFee})` }, type: "insufficient_balance" });
+      const qRem = dailyQuotaRemaining(reqAcc);
+      if (estFee > qRem) return res.status(429).json({ error: { message: `今日 burn 上限已到（每日上限 ${DAILY_BURN_CAP} SWAI，今日剩 ${qRem}）`, type: "daily_quota_exceeded" }, daily_cap: DAILY_BURN_CAP, daily_remaining: qRem });
+      ledgerBurnChecked(reqAcc, estFee, "img_" + Date.now(), "image_estimate");
+      freeServed = false;
+    } else if (target.free) { freeServed = true; }
+    const task_id = crypto.randomUUID();
+    const payload = {
+      task_id, "adapter": "image", prompt, n: units, size,
+      image_data: undefined, max_tokens: 0,
+    };
+    resultsStore.set(task_id, { ts: Date.now(), list: [], est_fee: estFee, units, unit_price: mm.unitPrice, assigned: new Set([target.node_id]) });
+    try {
+      const assignBody = { ...payload, auth: signAssign(task_id, target.node_id) };
+      if (target.pull) { const q = inbox.get(target.node_id) || []; q.push(assignBody); inbox.set(target.node_id, q); }
+      else await fetch(`${target.url}/assign`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(assignBody), signal: AbortSignal.timeout(180000) });
+    } catch (e) {
+      return res.status(500).json({ error: { message: `image worker 派工失敗：${e.message}`, type: "server_error" } });
+    }
+    // 等結果（最多 180s）
+    const deadline = Date.now() + 180000;
+    let rec = resultsStore.get(task_id);
+    while (Date.now() < deadline) {
+      rec = resultsStore.get(task_id);
+      if (rec && rec.list.length) break;
+      await new Promise(r => setTimeout(r, 1500));
+    }
+    rec = resultsStore.get(task_id);
+    const actualImgs = (rec?.list || []).flatMap(r => (r.images || []));
+    const images = actualImgs.map(img => ({ b64_json: String(img).replace(/^data:image\/\w+;base64,/, "") }));
+    if (!images.length) return res.status(500).json({ error: { message: "image worker 超時/無結果", type: "server_error" } });
+    const mints = [];
+    for (const r of (rec?.list || [])) {
+      const acc = (r._account) || (registry.get(r.node_id)?.account) || SYSTEM_ACCOUNT;
+      if (r.node_id) { const c = ledgerMint(acc, { units: actualImgs.length || 1, unitPrice: mm.unitPrice, taskId: task_id, note: "image_gen", nodeId: r.node_id, kind: "image" }); mints.push({ node_id: r.node_id, credit: c }); }
+    }
+    res.json({
+      created: Math.floor(Date.now()/1000), data: images, model,
+      usage: { image_count: images.length },
+      swarmai: { nodes: (rec.list || []).map(r => r.node_id), est_fee: estFee, free_served: freeServed, promo_used: promoUsed },
+    });
   } catch (e) {
     res.status(500).json({ error: { message: String(e.message || e).slice(0, 200) }, type: "server_error" });
   }
