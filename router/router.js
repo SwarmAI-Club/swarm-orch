@@ -289,7 +289,8 @@ function userByEmail(e) { return db.prepare("SELECT * FROM users WHERE email=?")
 const nodes = require(CONFIG);
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 // ---- Auth: all endpoints require X-Swarm-Token ----
 app.use((req, res, next) => {
   const p0 = req.path;
@@ -299,7 +300,7 @@ app.use((req, res, next) => {
     // OpenAI-compatible: Authorization: Bearer sk-swai-... or Bearer <token>
     const auth = String(req.get("authorization") || "");
     const m = auth.match(/^Bearer\s+(.+)$/i);
-    if (m) t = m[1].replace(/^sk-swai-/, "");
+    if (m) t = m[1].replace(/^sk-swai-/, "swai-").replace(/^sk-/, "");
   }
   if (t !== NET_TOKEN && !findUserByToken(t)) return res.status(401).json({ ok: false, error: "invalid x-swarm-token" });
   req.swarmToken = t;
@@ -728,10 +729,12 @@ app.post("/v1/chat/completions", async (req, res) => {
         p.push(node.node_id);
       } catch (e) { /* 單一等 */ }
     }
-    // 等結果（上限 ~90s）
-    const deadline = Date.now() + 90000;
-    while (Date.now() < deadline && (!(resultsStore.get(task_id)?.list) || resultsStore.get(task_id).list.length < p.length)) {
-      await new Promise(r => setTimeout(r, 400));
+    // 等結果：快返（≥1 result 即出，唔等齊）；上限 25s（OpenAI 兼容要 reasonable latency）
+    const deadline = Date.now() + 25000;
+    while (Date.now() < deadline) {
+      const cur = resultsStore.get(task_id);
+      if (cur && cur.list && cur.list.length >= 1) break;
+      await new Promise(r => setTimeout(r, 300));
     }
     const rec = resultsStore.get(task_id);
     const tally = {};
