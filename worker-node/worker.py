@@ -29,17 +29,16 @@ def jaccard(a, b):
     return inter / len(A | B)
 
 
-def llm_complete(completion_url, prompt, n_predict=512, temperature=0.6):
-    r = requests.post(
-        completion_url,
-        json={
-            "prompt": f"{prompt}\n\nASSISTANT:",
-            "n_predict": n_predict,
-            "temperature": temperature,
-            "stop": ["<|im_end|>"],
-        },
-        timeout=300,
-    )
+def llm_complete(completion_url, prompt, n_predict=512, temperature=0.6, image_data=None):
+    body = {
+        "prompt": f"{prompt}\n\nASSISTANT:",
+        "n_predict": n_predict,
+        "temperature": temperature,
+        "stop": ["<|im_end|>"],
+    }
+    if image_data:
+        body["image_data"] = image_data if isinstance(image_data, list) else [{"data": image_data}]
+    r = requests.post(completion_url, json=body, timeout=300)
     r.raise_for_status()
     j = r.json()
     content = str(j.get("content", "")).strip()
@@ -127,12 +126,13 @@ class Worker:
         prompt = body.get("prompt", "")
         n_votes = int(body.get("n_votes", 3))
         temperature = float(body.get("temperature", 0.6))
+        images = body.get("image_data") or None
         votes = []
         tokens_in_total = 0
         tokens_out_total = 0
         t0 = time.time()
         for i in range(n_votes):
-            res = llm_complete(self.args.completion, prompt, self.args.n_predict, temperature + (i * 0.05))
+            res = llm_complete(self.args.completion, prompt, self.args.n_predict, temperature + (i * 0.05), images)
             votes.append({"content": res["content"], "confidence": round(0.9, 3), "reasoning": ""})
             tokens_in_total += res["tokens_in"]
             tokens_out_total += res["tokens_out"]
