@@ -130,12 +130,12 @@ th{color:var(--acc)}
       <div class="muted" id="profile-eco" style="margin-top:8px"></div>
     </div>
     <div class="card">
-      <div class="muted" style="margin-bottom:8px">⚙️ Per-node 設定（sleep / share / suspend）— 每部 node 獨立覆寫 user 預設</div>
+      <div class="muted" style="margin-bottom:8px">⚙️ Per-node 設定（sleep / share / suspend / 移除）— 每部 node 獨立覆寫 user 預設</div>
       <table>
-        <thead><tr><th>Node</th><th>睡眠開始 (0-23)</th><th>睡眠結束 (0-23)</th><th>share % (0-100)</th><th>Suspend</th><th></th></tr></thead>
+        <thead><tr><th>Node</th><th>睡眠開始 (0-23)</th><th>睡眠結束 (0-23)</th><th>share % (0-100)</th><th>Suspend</th><th>移除 / 重啟</th><th></th></tr></thead>
         <tbody id="pn-rows"></tbody>
       </table>
-      <div class="muted" style="font-size:.78rem;margin-top:4px">留空 = 跟 user 預設（sleep 用 Profile 嗰兩格；share 用「新機預設 share」）。Suspend on = 呢部 node 暫時唔接任何工（唔編派）。sleep 窗口期間 node 視作 IDLE 自動共享賺 mint。</div>
+      <div class="muted" style="font-size:.78rem;margin-top:4px">留空 = 跟 user 預設（sleep 用 Profile 嗰兩格；share 用「新機預設 share」）。Suspend on = 暫時唔接任何工。Remove = 換機／唔要部機：即刻剔走出網絡，心跳唔會復活（重裝返同 node_id 就自動啟用）。<br>➕ 加一部新機：照 <code>howto.html</code> 再起一個 worker，用同一個 API token ＋ 新 <code>--node-id</code>（例如 <code>client-xxx-2</code>），呢度自動多一行。</div>
     </div>
     <div class="card">
       <div class="muted" style="margin-bottom:8px">🤖 用 OpenAI-compatible API（直接 replace 任何 OpenAI 地址）</div>
@@ -264,15 +264,34 @@ async function loadNodeSettings(nodes){
   rowEl.innerHTML = (nodes||[]).map(n=>{
     const st = n.settings||{};
     const sid = 'pn-'+n.node_id.replace(/[^a-zA-Z0-9_-]/g,'_');
+    const removed = st.removed;
+    const action = removed
+      ? `<button style="width:auto;padding:5px 12px;margin:0" onclick="enableNode('${n.node_id}')">啟用</button>`
+      : `<button style="width:auto;padding:5px 12px;margin:0" onclick="removeNode('${n.node_id}')">移除</button>`;
     return `<tr>
-      <td><code>${n.node_id||''}</code></td>
-      <td><input id="${sid}-ss" type="number" min="0" max="23" style="width:62px" value="${st.sleep_start_hour??''}" placeholder="−"></td>
-      <td><input id="${sid}-se" type="number" min="0" max="23" style="width:62px" value="${st.sleep_end_hour??''}" placeholder="−"></td>
-      <td><input id="${sid}-sh" type="number" min="0" max="100" style="width:62px" value="${st.share_ratio??''}" placeholder="−"></td>
-      <td><input id="${sid}-sp" type="checkbox" style="width:auto" ${st.suspend?'checked':''}></td>
-      <td><button style="width:auto;padding:5px 12px;margin:0" onclick="saveNodeSettings('${n.node_id}')">存</button></td>
+      <td><code>${n.node_id||''}</code>${removed?' <span class="muted">(已移除)</span>':''}</td>
+      <td><input id="${sid}-ss" type="number" min="0" max="23" style="width:62px" value="${st.sleep_start_hour??''}" placeholder="−" ${removed?'disabled':''}></td>
+      <td><input id="${sid}-se" type="number" min="0" max="23" style="width:62px" value="${st.sleep_end_hour??''}" placeholder="−" ${removed?'disabled':''}></td>
+      <td><input id="${sid}-sh" type="number" min="0" max="100" style="width:62px" value="${st.share_ratio??''}" placeholder="−" ${removed?'disabled':''}></td>
+      <td><input id="${sid}-sp" type="checkbox" style="width:auto" ${st.suspend?'checked':''} ${removed?'disabled':''}></td>
+      <td>${action}</td>
+      <td><button style="width:auto;padding:5px 12px;margin:0" onclick="saveNodeSettings('${n.node_id}')" ${removed?'disabled':''}>存</button></td>
     </tr>`;
-  }).join('') || '<tr><td colspan="6" class="muted">未有節點</td></tr>';
+  }).join('') || '<tr><td colspan="7" class="muted">未有節點</td></tr>';
+}
+
+async function removeNode(node_id){
+  if(!confirm('確認移除 '+node_id+' ？\n呢部 node 會即刻剔走網絡，心跳唔會復活（可以隨時重新安裝返）。')) return;
+  const r = await fetch('/portal/node_remove', {method:'POST', headers:{'content-type':'application/json','x-swarm-token':window.__tok}, body: JSON.stringify({node_id})});
+  const d = await r.json();
+  alert(d.ok ? '已移除 '+node_id : I('p_j_fail')+(d.error||''));
+  if(d.ok) loadMe();
+}
+async function enableNode(node_id){
+  const r = await fetch('/portal/node_enable', {method:'POST', headers:{'content-type':'application/json','x-swarm-token':window.__tok}, body: JSON.stringify({node_id})});
+  const d = await r.json();
+  alert(d.ok ? '已啟用 '+node_id+'（worker 下一次心跳就返嚟）' : I('p_j_fail')+(d.error||''));
+  if(d.ok) loadMe();
 }
 
 async function saveNodeSettings(node_id){

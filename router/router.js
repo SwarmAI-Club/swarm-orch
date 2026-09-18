@@ -259,12 +259,15 @@ db.exec(`CREATE TABLE IF NOT EXISTS node_settings(
   if (!cols.includes("sleep_end_hour")) adds.push("ADD COLUMN sleep_end_hour INTEGER");
   if (!cols.includes("share_ratio")) adds.push("ADD COLUMN share_ratio INTEGER");
   if (!cols.includes("suspend")) adds.push("ADD COLUMN suspend INTEGER DEFAULT 0");
+  if (!cols.includes("removed")) adds.push("ADD COLUMN removed INTEGER DEFAULT 0");
   for (const a of adds) db.exec(`ALTER TABLE node_settings ${a}`);
 })();
 function nodeSettingFree(nodeId) { return (db.prepare("SELECT free FROM node_settings WHERE node_id=?").get(nodeId) || {}).free || 0; }
 function nodeSetting(nodeId) { return db.prepare("SELECT * FROM node_settings WHERE node_id=?").get(String(nodeId)) || {}; }
 // 唔列為候選：suspend=1（暫停接工）或未註冊
 function nodeSuspended(nodeId) { return !!(nodeSetting(nodeId).suspend); }
+// 被主人移除（換機/重裝）：心跳唔再自動復活
+function nodeRemoved(nodeId) { return !!(nodeSetting(nodeId).removed); }
 function nodeShareOverride(nodeId) {
   const v = nodeSetting(nodeId).share_ratio;
   return v === null || v === undefined || v === "" ? null : Math.max(0, Math.min(100, Number(v)));
@@ -451,8 +454,11 @@ app.post("/register", (req, res) => {
   if (own && own.account !== acc) return res.status(403).json({ ok: false, error: `node ${node_id} 已註冊俾 ${own.account}` });
   if (!own) claimNode(node_id, acc);
   const n = registry.get(node_id) || { uptime_s: 0, last_status: null };
+  // 重新註冊 = 重裝/換機後再上線 → 清 removed 標記
+  db.prepare("UPDATE node_settings SET removed=0 WHERE node_id=?").run(node_id);
   Object.assign(n, { node_id, capabilities, model, gpu, max_context, speed, url, pull: !!req.body.pull });
-  n.share_ratio = Math.max(0, Math.min(100, Number(share_ratio !== undefined ? share_ratio : (n.share_ratio || 100))));
+  const so = nodeShareOverride(node_id);
+  n.share_ratio = Math.max(0, Math.min(100, so !== null ? so : (share_ratio !== undefined ? share_ratio : (n.share_ratio || 100))));
   // free：DB owner 設定優先（持久）；無則用 register flag
   if (nodeSettingFree(node_id)) { n.free = true; n.free_manual = true; }
   else if (!n.free_manual) n.free = !!free;   // free node：owner 設定優先（心跳/register 唔覆寫）
@@ -475,6 +481,8 @@ app.post("/status", (req, res) => {
   // 心跳但未註冊（router 重啟後）→ 自動補註冊（node_id 已知；心跳帶返完整資料）
   if (!n && node_id) {
     // P2 綁定：已有 owner 且唔係自己 → 心跳唔可以強搶呢個 node（防冒充）
+    // 被主人移除嘅 node：唔好俾心跳自動復活（換機/重裝場景）—— 心跳靜默 ack，唔註冊
+    if (nodeRemoved(node_id)) return res.json({ ok: true, node_id, removed: true });
     const own = nodeOwner(node_id);
     if (own && own.account !== acc) return res.status(403).json({ ok: false, error: `node ${node_id} 已註冊俾 ${own.account}` });
     if (!own) claimNode(node_id, acc);
@@ -1021,6 +1029,7 @@ app.get("/portal/me", (req, res) => {
         sleep_end_hour: st.sleep_end_hour ?? null,
         share_ratio: st.share_ratio ?? null,
         suspend: !!st.suspend,
+        removed: !!st.removed,
       },
     };
   });
@@ -1095,6 +1104,36 @@ app.post("/portal/node_settings", (req, res) => {
   cols.forEach((c, i) => out[c] = vals[i]);
   if (b.share_ratio !== undefined && b.share_ratio !== null && b.share_ratio !== "") n.share_ratio = Number(b.share_ratio);
   res.json({ ok: true, settings: out });
+});
+
+// 移除 node（換機/重裝/唔要部機）：從 registry 移除 + 標記 removed（心跳唔再復活）。
+// 想「重設」= 移除後再 register（新機照裝同 node_id 就自動 re-enable）。portability: 移除唔釋放 node_owners，
+// 因為 node_id 係你 email 派生，唔俾人偷；重新裝返同樣 BIND 返。
+app.post("/portal/node_remove", (req, res) => {
+  const u = findUserByToken(req.get("x-swarm-token"));
+  if (!u) return res.status(401).json({ ok: false, error: "invalid token" });
+  const node_id = String((req.body || {}).node_id || "");
+  if (!node_id) return res.status(400).json({ ok: false, error: "node_id required" });
+  const n = registry.get(node_id);
+  const isOwner = (n && n.account === u.email) || (nodeOwner(node_id) || {}).account === u.email;
+  if (!isOwner) return res.status(403).json({ ok: false, error: "唔係你嘅 node" });
+  registry.delete(node_id);
+  db.prepare("INSERT INTO node_settings(node_id,email,removed,updated) VALUES(?,?,1,?) ON CONFLICT(node_id) DO UPDATE SET removed=1, updated=?")
+    .run(node_id, u.email, Date.now(), Date.now());
+  console.log(`[node_remove] ${u.email} removed ${node_id}`);
+  res.json({ ok: true, node_id, removed: true, hint: "重新裝返同一 node_id 就會自動啟用；想用新機新名 → 裝新 worker 用新 --node-id" });
+});
+
+// 重新啟用被移除嘅 node（重裝後第一次 register 會自動 re-enable；呢個 endpoint 係俾 portal 一鍵)
+app.post("/portal/node_enable", (req, res) => {
+  const u = findUserByToken(req.get("x-swarm-token"));
+  if (!u) return res.status(401).json({ ok: false, error: "invalid token" });
+  const node_id = String((req.body || {}).node_id || "");
+  if (!node_id) return res.status(400).json({ ok: false, error: "node_id required" });
+  const isOwner = (nodeOwner(node_id) || {}).account === u.email;
+  if (!isOwner) return res.status(403).json({ ok: false, error: "唔係你嘅 node" });
+  db.prepare("UPDATE node_settings SET removed=0, updated=? WHERE node_id=?").run(Date.now(), node_id);
+  res.json({ ok: true, node_id, enabled: true, hint: "node 已可重新上線（心跳/register 會帶返嚟）" });
 });
 
 app.post("/portal/forgot", (req, res) => {
