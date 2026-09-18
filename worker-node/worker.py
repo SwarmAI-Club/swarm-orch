@@ -41,7 +41,40 @@ def llm_complete(completion_url, prompt, n_predict=512, temperature=0.6):
         timeout=300,
     )
     r.raise_for_status()
-    return r.json().get("content", "").strip()
+    j = r.json()
+    content = str(j.get("content", "")).strip()
+    # llama-server /completion 回報 token 用量（用於按 tokens 計費）
+    return {
+        "content": content,
+        "tokens_in": int(j.get("tokens_evaluated", 0) or 0),
+        "tokens_out": int(j.get("tokens_predicted", 0) or 0),
+    }
+
+
+def _auto_bench(args):
+    """自動測一次 tok/s（idle 產能計用）。若已有 --speed 則唔測。"""
+    sp = args.speed
+    try:
+        spf = float(sp)
+        return sp
+    except (TypeError, ValueError):
+        pass
+    try:
+        t0 = time.time()
+        r = requests.post(args.completion, json={
+            "prompt": "USER: 1+1=?\n\nASSISTANT:",
+            "n_predict": 8, "temperature": 0.1,
+            "stop": ["<|im_end|>"],
+        }, timeout=60)
+        j = r.json()
+        n_out = int(j.get("tokens_predicted", 8) or 0)
+        dt = time.time() - t0
+        spd = n_out / dt if dt > 0 else 0
+        print(f"[worker] auto-bench: ~{spd:.1f} tok/s", file=sys.stderr)
+        return f"{spd:.1f}"
+    except Exception as e:
+        print(f"[worker] bench FAIL: {e}", file=sys.stderr)
+        return sp
 
 
 def _headers(args):
@@ -94,14 +127,19 @@ class Worker:
         n_votes = int(body.get("n_votes", 3))
         temperature = float(body.get("temperature", 0.6))
         votes = []
+        tokens_in_total = 0
+        tokens_out_total = 0
         t0 = time.time()
         for i in range(n_votes):
-            content = llm_complete(self.args.completion, prompt, self.args.n_predict, temperature + (i * 0.05))
-            votes.append({"content": content, "confidence": round(0.9, 3), "reasoning": ""})
+            res = llm_complete(self.args.completion, prompt, self.args.n_predict, temperature + (i * 0.05))
+            votes.append({"content": res["content"], "confidence": round(0.9, 3), "reasoning": ""})
+            tokens_in_total += res["tokens_in"]
+            tokens_out_total += res["tokens_out"]
         payload = {
             "type": "task_result", "task_id": body.get("task_id"),
             "node_id": self.args.node_id, "votes": votes,
             "duration_ms": int((time.time() - t0) * 1000),
+            "tokens_in": tokens_in_total, "tokens_out": tokens_out_total,
         }
         try:
             requests.post(self.args.router.rstrip("/") + "/result", json=payload, headers=_headers(self.args), timeout=20)
@@ -111,12 +149,16 @@ class Worker:
 
     def heartbeat_once(self, sleeping=False):
         try:
-            requests.post(self.args.router.rstrip("/") + "/status", json={
+            r = requests.post(self.args.router.rstrip("/") + "/status", json={
                 "type": "node_status", "node_id": self.args.node_id,
                 "status": "IDLE_SHARING" if sleeping else "USER_OCCUPIED",
                 "vram_used_gb": self.args.vram, "model_loaded": self.args.model,
                 "sleeping": sleeping, "ts": int(time.time()),
             }, headers=_headers(self.args), timeout=10)
+            # router 重啟後（registry 空 / 未註冊）→ 自動補完整 /register
+            if r.status_code in (401, 404) or r.json().get("ok") is False:
+                print("[worker] 心跳未註冊 → re-register", file=sys.stderr)
+                self.register(retries=2, delay=1)
         except Exception as e:
             print(f"[worker] heartbeat FAIL: {e}", file=sys.stderr)
 
@@ -204,6 +246,11 @@ def main():
         sys.exit(1)
 
     worker = Worker(args)
+    if args.speed:
+        worker.info["speed"] = args.speed
+    else:
+        worker.info["speed"] = _auto_bench(args)
+    worker.args.speed = worker.info["speed"]
     if not worker.register():
         sys.exit(1)
 
