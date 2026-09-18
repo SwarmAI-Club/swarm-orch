@@ -29,12 +29,20 @@ def jaccard(a, b):
     return inter / len(A | B)
 
 
-def llm_complete(completion_url, prompt, n_predict=512, temperature=0.6, image_data=None):
+def _chat_base(completion_url):
+    """由 /completion URL 推斷 llama-server 相容 API base（/v1/chat/completions）"""
+    url = str(completion_url or "").rstrip("/")
+    if url.endswith("/completion"):
+        url = url[: -len("/completion")]
+    return url
+
+
+def llm_complete(completion_url, prompt, n_predict=512, temperature=0.6, image_data=None, max_tokens=None, stop=None):
     body = {
         "prompt": f"{prompt}\n\nASSISTANT:",
-        "n_predict": n_predict,
+        "n_predict": int(max_tokens or n_predict),
         "temperature": temperature,
-        "stop": ["<|im_end|>"],
+        "stop": stop or ["<|im_end|>", "\n\nUSER:", "\n\nASSISTANT:"],
     }
     if image_data:
         body["image_data"] = image_data if isinstance(image_data, list) else [{"data": image_data}]
@@ -47,6 +55,35 @@ def llm_complete(completion_url, prompt, n_predict=512, temperature=0.6, image_d
         "content": content,
         "tokens_in": int(j.get("tokens_evaluated", 0) or 0),
         "tokens_out": int(j.get("tokens_predicted", 0) or 0),
+    }
+
+
+def llm_chat(chat_url, messages, tools=None, tool_choice=None, max_tokens=None, temperature=0.6, stop=None):
+    """Chat / tool-call mode：直入 llama-server /v1/chat/completions。
+    支援結構化 tool_calls 回傳（agentic client 必要）。"""
+    body = {
+        "messages": messages or [],
+        "temperature": temperature,
+    }
+    if tools:
+        body["tools"] = tools
+        body.setdefault("tool_choice", tool_choice or "auto")
+    if max_tokens:
+        body["max_tokens"] = int(max_tokens)
+    if stop:
+        body["stop"] = stop
+    r = requests.post(_chat_base(chat_url) + "/v1/chat/completions", json=body, timeout=300)
+    r.raise_for_status()
+    j = r.json()
+    choice = (j.get("choices") or [{}])[0]
+    msg = choice.get("message") or {}
+    usage = j.get("usage") or {}
+    return {
+        "content": msg.get("content") or "",
+        "tool_calls": msg.get("tool_calls"),
+        "finish_reason": choice.get("finish_reason") or "stop",
+        "tokens_in": int(usage.get("prompt_tokens") or 0),
+        "tokens_out": int(usage.get("completion_tokens") or 0),
     }
 
 
@@ -137,19 +174,40 @@ class Worker:
                 "reason": "capability_match" if accepted else "no_capability"}
 
     def on_assign(self, body):
-        prompt = body.get("prompt", "")
-        n_votes = int(body.get("n_votes", 3))
+        chat_messages = body.get("chat_messages")
+        tools = body.get("tools")
+        max_tokens = body.get("max_tokens")
+        stop = body.get("stop")
         temperature = float(body.get("temperature", 0.6))
         images = body.get("image_data") or None
+        t0 = time.time()
         votes = []
         tokens_in_total = 0
         tokens_out_total = 0
-        t0 = time.time()
-        for i in range(n_votes):
-            res = llm_complete(self.args.completion, prompt, self.args.n_predict, temperature + (i * 0.05), images)
-            votes.append({"content": res["content"], "confidence": round(0.9, 3), "reasoning": ""})
+        if chat_messages:
+            # tool-call / chat mode：單一 structured generation（唔適合 CoT 投票），
+            # 保留原始 messages + tools schema → 有真 tool_calls 回傳
+            res = llm_chat(self.args.completion, chat_messages, tools,
+                           tool_choice=body.get("tool_choice"),
+                           max_tokens=max_tokens, temperature=temperature, stop=stop)
+            vote = {"content": res["content"], "confidence": 0.9, "reasoning": ""}
+            if res["tool_calls"]:
+                vote["tool_calls"] = res["tool_calls"]
+            if res.get("finish_reason"):
+                vote["finish_reason"] = res["finish_reason"]
+            votes.append(vote)
             tokens_in_total += res["tokens_in"]
             tokens_out_total += res["tokens_out"]
+        else:
+            # 原本 CoT 投票模式（text completion）
+            prompt = body.get("prompt", "")
+            n_votes = int(body.get("n_votes", 3))
+            for i in range(n_votes):
+                res = llm_complete(self.args.completion, prompt, max_tokens or self.args.n_predict,
+                                   temperature + (i * 0.05), images, max_tokens=max_tokens, stop=stop)
+                votes.append({"content": res["content"], "confidence": round(0.9, 3), "reasoning": ""})
+                tokens_in_total += res["tokens_in"]
+                tokens_out_total += res["tokens_out"]
         payload = {
             "type": "task_result", "task_id": body.get("task_id"),
             "node_id": self.args.node_id, "votes": votes,
@@ -244,7 +302,10 @@ def _poll_loop(worker):
                     continue
                 worker.on_assign({"task_id": t["task_id"], "beacon_id": t.get("beacon_id"),
                                   "prompt": t.get("prompt", ""), "n_votes": t.get("n_votes", 3),
-                                  "temperature": t.get("temperature", 0.6)})
+                                  "temperature": t.get("temperature", 0.6),
+                                  "chat_messages": t.get("chat_messages"),
+                                  "tools": t.get("tools"), "tool_choice": t.get("tool_choice"),
+                                  "max_tokens": t.get("max_tokens"), "stop": t.get("stop")})
             if tasks:
                 print(f"[worker] pull processed {len(tasks)} task(s)", flush=True)
         except Exception as e:
