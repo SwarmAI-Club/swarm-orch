@@ -97,6 +97,27 @@ th{color:var(--acc)}
       </table>
       <div class="muted" id="profile-eco" style="margin-top:8px"></div>
     </div>
+    <div class="card">
+      <div class="muted" style="margin-bottom:8px">🤖 用 OpenAI-compatible API（直接 replace 任何 OpenAI 地址）</div>
+      <div style="font-size:.85rem;line-height:1.7">
+        <div>Base URL: <code>https://swarmai.club/swarm/v1</code></div>
+        <div>API key: <code>sk-swai-&lt;你條 X-Swarm-Token&gt;</code></div>
+        <div>Model: <code>swarmai-fast</code>（勁機 S/A）· <code>swarmai-normal</code>（平價 B/C）· vision 自動分流</div>
+        <div style="margin-top:6px">curl 例子：</div>
+        <pre style="font-size:.72rem">curl https://swarmai.club/swarm/v1/chat/completions \
+  -H "Authorization: Bearer sk-swai-&lt;token&gt;" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"swarmai-fast","messages":[{"role":"user","content":"Hello"}],"max_tokens":200}'</pre>
+        <div style="margin-top:6px">Python（openai SDK）：</div>
+        <pre style="font-size:.72rem">from openai import OpenAI
+client = OpenAI(base_url="https://swarmai.club/swarm/v1",
+                api_key="sk-swai-&lt;token&gt;")
+r = client.chat.completions.create(
+    model="swarmai-fast",
+    messages=[{"role":"user","content":"Hello"}])
+print(r.choices[0].message.content)</pre>
+      </div>
+    </div>
     <button onclick="logout()"><span data-i18n="p_btn_logout">登出</span></button>
   </div>
 </div>
