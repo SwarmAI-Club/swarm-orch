@@ -130,6 +130,14 @@ th{color:var(--acc)}
       <div class="muted" id="profile-eco" style="margin-top:8px"></div>
     </div>
     <div class="card">
+      <div class="muted" style="margin-bottom:8px">⚙️ Per-node 設定（sleep / share / suspend）— 每部 node 獨立覆寫 user 預設</div>
+      <table>
+        <thead><tr><th>Node</th><th>睡眠開始 (0-23)</th><th>睡眠結束 (0-23)</th><th>share % (0-100)</th><th>Suspend</th><th></th></tr></thead>
+        <tbody id="pn-rows"></tbody>
+      </table>
+      <div class="muted" style="font-size:.78rem;margin-top:4px">留空 = 跟 user 預設（sleep 用 Profile 嗰兩格；share 用「新機預設 share」）。Suspend on = 呢部 node 暫時唔接任何工（唔編派）。sleep 窗口期間 node 視作 IDLE 自動共享賺 mint。</div>
+    </div>
+    <div class="card">
       <div class="muted" style="margin-bottom:8px">🤖 用 OpenAI-compatible API（直接 replace 任何 OpenAI 地址）</div>
       <div style="font-size:.85rem;line-height:1.7">
         <div>Base URL: <code>https://swarmai.club/swarm/v1</code></div>
@@ -246,7 +254,38 @@ async function loadMe(){
       }
     }
     loadKeys();
+    loadNodeSettings(d.nodes||[]);
   }catch(e){ E('led').textContent=I('p_j_loadfail')+': '+e; }
+}
+
+async function loadNodeSettings(nodes){
+  const rowEl = E('pn-rows');
+  if(!rowEl) return;
+  rowEl.innerHTML = (nodes||[]).map(n=>{
+    const st = n.settings||{};
+    const sid = 'pn-'+n.node_id.replace(/[^a-zA-Z0-9_-]/g,'_');
+    return `<tr>
+      <td><code>${n.node_id||''}</code></td>
+      <td><input id="${sid}-ss" type="number" min="0" max="23" style="width:62px" value="${st.sleep_start_hour??''}" placeholder="−"></td>
+      <td><input id="${sid}-se" type="number" min="0" max="23" style="width:62px" value="${st.sleep_end_hour??''}" placeholder="−"></td>
+      <td><input id="${sid}-sh" type="number" min="0" max="100" style="width:62px" value="${st.share_ratio??''}" placeholder="−"></td>
+      <td><input id="${sid}-sp" type="checkbox" style="width:auto" ${st.suspend?'checked':''}></td>
+      <td><button style="width:auto;padding:5px 12px;margin:0" onclick="saveNodeSettings('${n.node_id}')">存</button></td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="6" class="muted">未有節點</td></tr>';
+}
+
+async function saveNodeSettings(node_id){
+  const sid = 'pn-'+node_id.replace(/[^a-zA-Z0-9_-]/g,'_');
+  const body = {};
+  const ss = E(sid+'-ss').value, se = E(sid+'-se').value, sh = E(sid+'-sh').value;
+  if(ss!=='') body.sleep_start_hour = Number(ss);
+  if(se!=='') body.sleep_end_hour = Number(se);
+  if(sh!=='') body.share_ratio = Number(sh);
+  body.suspend = E(sid+'-sp').checked;
+  const r = await fetch('/portal/node_settings', {method:'POST', headers:{'content-type':'application/json','x-swarm-token':window.__tok}, body: JSON.stringify({node_id, ...body})});
+  const d = await r.json();
+  if(d.ok){ alert('已儲存 '+node_id); loadMe(); } else alert(I('p_j_fail')+(d.error||''));
 }
 
 async function loadKeys(){

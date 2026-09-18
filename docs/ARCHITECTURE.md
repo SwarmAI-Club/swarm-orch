@@ -142,3 +142,14 @@ mint mult = 0.75 + rating/100×0.5；派工 sort 乘 rating
 - llama-server 未有加密 proof-of-work（attestation 太複雜；現行用「實測 speed/ctx + 驗證任務抽查 + 信心分」嚟防呃）
 - idle 免驗真idle → 可能過度申報（時區/法規驗係將來）
 - HA router 未有（單點中央 router；每日 snapshot 備份 ledger.db）
+
+## 10b. Specialty Service 擴展（2026-09-19）— SD-WebUI / Wan / TTS 等非 text LLM
+- **原則：普通用戶安裝一律 text model（Qwythos 等），零選擇**；specialty 由平台自家節點 + 進階用戶選配提供，唔計入一般用戶必修，避免用戶比例失衡。
+- **架構唔使改**：router 派工按 `capabilities` tag 匹配（`reasoning/math/code/vision`…），specialty 只係**新增 tag + MODEL_MAP 條目**：
+  - `image-gen` → SD-WebUI / ComfyUI 工人（能力：文生圖/圖生圖）
+  - `video-gen` → Wan 2.2（TI2V/I2V）、Swan 等視訊模型
+  - `tts` / `audio` → TTS / 語音
+  - 每個 tag = 一個「service 群組」，`MODEL_MAP` 加條目（如 `swarmai-image`、`swarmai-video`）設 tier/n_votes；dedicated `/v1/images/generations` 風格 gateway 係將來（v1 x 做好 text 先）。
+- **Worker 側**：`worker.py` 而家淨識 call `/completion`（text）。specialty worker 只係「另一隻 protocol worker」——同 router 用 `/assign`+`/result` 對接，淨係 completion 改做圖/視訊 API。sandbox Dockerfile 加 `--gpus` + 額外依賴即可。
+- **Vision（現有）**：`qwen-vision` 係平台自家 node（rtx2080ti :8089），`swarmai-vision` 自動分流；唔要求一般用戶裝 VL model。若全網冇 vision node 上線，image 請求先會 503 —— 靠平台 keep ≥1 隻 VL 兜底。
+- **節點設定分層（2026-09-19 起）**：user-level（`users` 表）：display_name / pref_model / timezone / sleep 窗口 / share_default / max_budget_per_task；**node-level（`node_settings` 表）**：free / sleep_start_hour / sleep_end_hour / share_ratio / suspend —— node 有設就覆寫 user 預設（`nodeShareOverride` / `nodeSuspended`），portal `/portal/node_settings` 逐 node 設定。

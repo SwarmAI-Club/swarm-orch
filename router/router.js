@@ -241,14 +241,34 @@ db.exec(`CREATE TABLE IF NOT EXISTS promo_uses(
   if (!cols.includes("per_user")) db.exec("ALTER TABLE promotions ADD COLUMN per_user INTEGER DEFAULT 1");
 })();
 const SIGNUP_BONUS = Number(process.env.SWARM_SIGNUP_BONUS || 50); // Pilot: 開戶送分
-// per-node owner settings（free 持久化）
+// per-node owner settings（free/sleep/share/suspend 持久化；node 級覆寫 user 預設）
 db.exec(`CREATE TABLE IF NOT EXISTS node_settings(
   node_id TEXT PRIMARY KEY,
   email TEXT NOT NULL,
   free INTEGER DEFAULT 0,
+  sleep_start_hour INTEGER,
+  sleep_end_hour INTEGER,
+  share_ratio INTEGER,
+  suspend INTEGER DEFAULT 0,
   updated INTEGER
 )`);
+(function migrateNodeSettings() {
+  const cols = db.prepare("PRAGMA table_info(node_settings)").all().map(c => c.name);
+  const adds = [];
+  if (!cols.includes("sleep_start_hour")) adds.push("ADD COLUMN sleep_start_hour INTEGER");
+  if (!cols.includes("sleep_end_hour")) adds.push("ADD COLUMN sleep_end_hour INTEGER");
+  if (!cols.includes("share_ratio")) adds.push("ADD COLUMN share_ratio INTEGER");
+  if (!cols.includes("suspend")) adds.push("ADD COLUMN suspend INTEGER DEFAULT 0");
+  for (const a of adds) db.exec(`ALTER TABLE node_settings ${a}`);
+})();
 function nodeSettingFree(nodeId) { return (db.prepare("SELECT free FROM node_settings WHERE node_id=?").get(nodeId) || {}).free || 0; }
+function nodeSetting(nodeId) { return db.prepare("SELECT * FROM node_settings WHERE node_id=?").get(String(nodeId)) || {}; }
+// 唔列為候選：suspend=1（暫停接工）或未註冊
+function nodeSuspended(nodeId) { return !!(nodeSetting(nodeId).suspend); }
+function nodeShareOverride(nodeId) {
+  const v = nodeSetting(nodeId).share_ratio;
+  return v === null || v === undefined || v === "" ? null : Math.max(0, Math.min(100, Number(v)));
+}
 function promoValid(code) {
   if (!code) return null;
   const row = db.prepare("SELECT * FROM promotions WHERE code=?").get(String(code));
@@ -407,9 +427,11 @@ function jaccard(a, b) {
 function matchCapabilities(required, candidates) {
   return candidates
     .filter(n => Array.isArray(n.capabilities))
+    .filter(n => n.node_id ? !nodeSuspended(n.node_id) : true)   // suspend 唔接工
     .map(n => {
       const base = jaccard(required, n.capabilities);
-      const ratio = Math.max(1, Math.min(100, Number(n.share_ratio !== undefined ? n.share_ratio : 100)));
+      const ov = nodeShareOverride(n.node_id);
+      const ratio = Math.max(1, Math.min(100, ov !== null ? ov : (n.share_ratio !== undefined ? n.share_ratio : 100)));
       // rating 乘入派工優先（0.75–1.25x）；高分行食多單
       const rating = computeRating(n).score;
       const rMult = 0.75 + (rating / 100) * 0.5;
@@ -492,7 +514,8 @@ app.post("/status", (req, res) => {
       const spd = parseFloat(n.speed) || 0;
       if (dtSec > 5 && spd > 0) {
         const acc = n.account || accountForToken(req.get("x-swarm-token")) || SYSTEM_ACCOUNT;
-        const ratio = Math.max(0, Math.min(100, Number(n.share_ratio !== undefined ? n.share_ratio : 100)));
+        const ov = nodeShareOverride(node_id);
+        const ratio = Math.max(0, Math.min(100, ov !== null ? ov : (n.share_ratio !== undefined ? n.share_ratio : 100)));
         const tokens = Math.round(spd * dtSec * (ratio / 100));
         if (tokens > 0) {
           const c = ledgerMint(acc, { tokensIn: 0, tokensOut: tokens, taskId: null, note: "idle_uptime", nodeId: node_id, kind: "idle" });
@@ -986,12 +1009,21 @@ app.get("/portal/me", (req, res) => {
   const u = findUserByToken(t);
   if (!u) return res.status(401).json({ ok: false, error: "invalid token" });
   const led = db.prepare("SELECT * FROM ledger WHERE account=? ORDER BY id DESC LIMIT 20").all(u.email);
-  const nodes = [...registry.values()].filter(n => n.account === u.email).map(n => ({
-    node_id: n.node_id, speed: parseFloat(n.speed) || 0, share_ratio: Math.max(0, Math.min(100, Number(n.share_ratio !== undefined ? n.share_ratio : 100))),
-    tier: nodeTier(n), ctx: n.max_context || 0, model: n.model || "", gpu: n.gpu || "", free: !!n.free,
-    abilities: n.abilities || null,
-    rating: computeRating(n),
-  }));
+  const nodes = [...registry.values()].filter(n => n.account === u.email).map(n => {
+    const st = nodeSetting(n.node_id);
+    return {
+      node_id: n.node_id, speed: parseFloat(n.speed) || 0, share_ratio: Math.max(0, Math.min(100, Number(n.share_ratio !== undefined ? n.share_ratio : 100))),
+      tier: nodeTier(n), ctx: n.max_context || 0, model: n.model || "", gpu: n.gpu || "", free: !!n.free,
+      abilities: n.abilities || null,
+      rating: computeRating(n),
+      settings: {
+        sleep_start_hour: st.sleep_start_hour ?? null,
+        sleep_end_hour: st.sleep_end_hour ?? null,
+        share_ratio: st.share_ratio ?? null,
+        suspend: !!st.suspend,
+      },
+    };
+  });
   const prof = db.prepare("SELECT display_name, pref_model, timezone, sleep_start_hour, sleep_end_hour, share_default, max_budget_per_task FROM users WHERE email=?").get(u.email) || {};
   res.json({
     ok: true, email: u.email, node_id: u.node_id, account: u.email, balance: creditBalance(u.email),
@@ -1037,6 +1069,32 @@ app.post("/portal/node_toggle", (req, res) => {
   db.prepare("INSERT INTO node_settings(node_id,email,free,updated) VALUES(?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET free=?, updated=?")
     .run(String(node_id), u.email, n.free ? 1 : 0, Date.now(), n.free ? 1 : 0, Date.now());
   res.json({ ok: true, node_id, free: n.free });
+});
+
+// per-node 設定：sleep 窗口 / share_ratio / suspend（node 級覆寫 user 預設；冇填 = 跟 user 預設）
+app.post("/portal/node_settings", (req, res) => {
+  const u = findUserByToken(req.get("x-swarm-token"));
+  if (!u) return res.status(401).json({ ok: false, error: "invalid token" });
+  const { node_id } = req.body || {};
+  if (!node_id) return res.status(400).json({ ok: false, error: "node_id required" });
+  const n = registry.get(String(node_id));
+  if (!n) return res.status(404).json({ ok: false, error: "node 唔存在" });
+  if (n.account !== u.email) return res.status(403).json({ ok: false, error: "唔係你嘅 node" });
+  const b = req.body || {};
+  const cols = [];
+  const vals = [];
+  if (b.sleep_start_hour !== undefined && b.sleep_start_hour !== null && b.sleep_start_hour !== "") { cols.push("sleep_start_hour"); vals.push(Math.max(0, Math.min(23, Number(b.sleep_start_hour) || 0))); }
+  if (b.sleep_end_hour !== undefined && b.sleep_end_hour !== null && b.sleep_end_hour !== "") { cols.push("sleep_end_hour"); vals.push(Math.max(0, Math.min(23, Number(b.sleep_end_hour) || 0))); }
+  if (b.share_ratio !== undefined && b.share_ratio !== null && b.share_ratio !== "") { cols.push("share_ratio"); vals.push(Math.max(0, Math.min(100, Number(b.share_ratio) || 0))); }
+  if (b.suspend !== undefined) { cols.push("suspend"); vals.push(b.suspend ? 1 : 0); }
+  if (!cols.length) return res.status(400).json({ ok: false, error: "no fields" });
+  db.prepare(`INSERT OR IGNORE INTO node_settings(node_id,email,updated) VALUES(?,?,?)`).run(String(node_id), u.email, Date.now());
+  const sets = cols.map(c => `${c}=?`).join(",");
+  db.prepare(`UPDATE node_settings SET ${sets}, updated=? WHERE node_id=?`).run(...vals, Date.now(), String(node_id));
+  const out = { node_id };
+  cols.forEach((c, i) => out[c] = vals[i]);
+  if (b.share_ratio !== undefined && b.share_ratio !== null && b.share_ratio !== "") n.share_ratio = Number(b.share_ratio);
+  res.json({ ok: true, settings: out });
 });
 
 app.post("/portal/forgot", (req, res) => {
