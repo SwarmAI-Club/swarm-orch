@@ -112,7 +112,7 @@ mint mult = 0.75 + rating/100×0.5；派工 sort 乘 rating
 | P1 | /v1/models + /v1/chat + MODEL_MAP + tier 收費 | ✅ (2026-09-18 實測) |
 | P1b | image detect → vision route + image_data | ✅ 自動 swarmai-fast-vision 純 tokens |
 | P2 | /result 驗 node、poll 鎖 node、assign HMAC auth 封網 | ✅ 403 verified；封網 pending |
-| P3 | Profile 完整 + Grade + rating | ✅ Grade S/A/B/C + tier/ctx display |
+| P3 | Profile 完整 + Grade + rating 入派工 | ✅ Grade S/A/B/C + dispatch weighted by rating |
 | P4 | 送分 50 + promo + 邀請 code | ✅ 開戶送 50、/admin/promo、banner |
 | P5 | docker bridge + host.docker.internal + nvidia-smi tier | ✅ bridge+host-gateway+pull；nvidia-smi pending |
 
