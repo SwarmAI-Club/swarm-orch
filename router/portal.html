@@ -110,16 +110,18 @@ th{color:var(--acc)}
     <div class="card">
       <div class="muted" style="margin-bottom:8px">📊 節點評分（User Profile Stats）</div>
       <table>
-        <thead><tr><th>Node</th><th>Tier</th><th>Model</th><th>Ctx</th><th>tok/s</th><th>Grade</th></tr></thead>
+        <thead><tr><th>Node</th><th>Tier</th><th>Model</th><th>Ctx</th><th>tok/s</th><th>Grade</th><th>Free</th></tr></thead>
         <tbody id="profile-nodes"></tbody>
       </table>
+      <input type="checkbox" id="pf-free-chk" onchange="toggleNodeFree()" style="width:auto"> 將此 node 設為 <b>Free</b>（其他人用唔 burn，你照收 mint）<br>
+      <div class="muted" style="font-size:.8rem;margin-top:4px">⚠️ Free 嘅 node 會被任何較成熟用戶免費使用 —— 世界唔完美，濫用風險存在，揀 node 有 rating guard。想 100% 安全就唔好開 free。</div>
       <div class="muted" id="profile-eco" style="margin-top:8px"></div>
     </div>
     <div class="card">
       <div class="muted" style="margin-bottom:8px">🤖 用 OpenAI-compatible API（直接 replace 任何 OpenAI 地址）</div>
       <div style="font-size:.85rem;line-height:1.7">
         <div>Base URL: <code>https://swarmai.club/swarm/v1</code></div>
-        <div>API key: <code>sk-swai-&lt;你條 X-Swarm-Token&gt;</code></div>
+        <div>API key（二選一都得）: <code>sk-swai-&lt;token&gt;</code> 或直接 <code>&lt;token&gt;</code>（<code>sk-</code> 只係 OpenAI 相容前綴，router 會自動剝落）</div>
         <div>Model: <code>swarmai-fast</code>（勁機 S/A）· <code>swarmai-normal</code>（平價 B/C）· vision 自動分流</div>
         <div style="margin-top:6px">curl 例子：</div>
         <pre style="font-size:.72rem">curl https://swarmai.club/swarm/v1/chat/completions \
@@ -205,9 +207,9 @@ async function loadMe(){
     // User Profile: nodes + rating + tier
     const rows = (d.nodes||[]).map(n=>{
       const rt=n.rating||{};
-      return `<tr><td>${n.node_id||''}</td><td>${n.tier||'-'}</td><td>${n.model||'-'}</td><td>${n.ctx||0}</td><td>${n.speed||0}</td><td><b>${rt.grade||'-'}</b> (${rt.score||0})</td></tr>`;
+      return `<tr><td>${n.node_id||''}</td><td>${n.tier||'-'}</td><td>${n.model||'-'}</td><td>${n.ctx||0}</td><td>${n.speed||0}</td><td><b>${rt.grade||'-'}</b> (${rt.score||0})</td><td>${n.free?'✅':'—'}</td></tr>`;
     }).join('');
-    E('profile-nodes').innerHTML = rows || '<tr><td colspan="6" class="muted">未有節點上線 — 用你 API token 起 worker 就有</td></tr>';
+    E('profile-nodes').innerHTML = rows || '<tr><td colspan="7" class="muted">未有節點上線 — 用你 API token 起 worker 就有</td></tr>';
     E('profile-eco').textContent = d.economy_note || '';
     // 填 profile 表單（一次性，唔覆蓋用戶已輸入）
     if (d.profile) {
@@ -220,6 +222,12 @@ async function loadMe(){
         if (E('pf-model')) E('pf-model').value = pf.pref_model || 'swarmai-normal';
         if (E('pf-share')) E('pf-share').value = pf.share_default ?? 100;
         document.__pfSeed = true;
+      }
+      // free checkbox：預設揀第一個 node 嘅 free 狀態
+      if (E('pf-free-chk') && (d.nodes||[]).length && !document.__pfFreeSeed) {
+        document.__curNode = d.nodes[0].node_id;
+        E('pf-free-chk').checked = !!d.nodes[0].free;
+        document.__pfFreeSeed = true;
       }
     }
     loadKeys();
@@ -250,6 +258,14 @@ async function revokeKey(tok){
 
 function logout(){ location.reload(); }
 
+async function toggleNodeFree(){
+  if(!window.__curNode) return;
+  try{
+    const r = await fetch('/portal/node_toggle', {method:'POST', headers:{'content-type':'application/json','x-swarm-token':window.__tok}, body: JSON.stringify({node_id:window.__curNode, free: E('pf-free-chk').checked})});
+    const d = await r.json();
+    if(!d.ok) E('pf-status').textContent='❌ '+d.error;
+  }catch(e){}
+}
 async function saveProfile(){
   const body = {
     display_name: E('pf-name').value,

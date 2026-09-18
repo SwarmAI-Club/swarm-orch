@@ -268,10 +268,11 @@ function matchCapabilities(required, candidates) {
 }
 
 app.post("/register", (req, res) => {
-  const { node_id, capabilities, model, gpu, max_context, speed, share_ratio, url } = req.body;
+  const { node_id, capabilities, model, gpu, max_context, speed, share_ratio, url, free } = req.body;
   const n = registry.get(node_id) || { uptime_s: 0, last_status: null };
   Object.assign(n, { node_id, capabilities, model, gpu, max_context, speed, url, pull: !!req.body.pull });
   n.share_ratio = Math.max(0, Math.min(100, Number(share_ratio !== undefined ? share_ratio : (n.share_ratio || 100))));
+  n.free = !!free;   // free node：要求者唔 burn，Node owner 照收 mint（善意分享）
   const tk = req.get("x-swarm-token");
   n.account = accountForToken(tk) || n.account || SYSTEM_ACCOUNT;
   registry.set(node_id, n);
@@ -294,6 +295,7 @@ app.post("/status", (req, res) => {
     n.model = req.body.model || "";
     n.max_context = req.body.max_context || 0;
     n.share_ratio = Math.max(0, Math.min(100, Number(req.body.share_ratio !== undefined ? req.body.share_ratio : 100)));
+    n.free = !!req.body.free;
     registry.set(node_id, n);
   }
   // 心跳帶咗最新 hardware 資料 → 更新（唔淨 auto-register）
@@ -304,6 +306,7 @@ app.post("/status", (req, res) => {
     if (req.body.speed) n.speed = req.body.speed;
     if (req.body.url) n.url = req.body.url;
     if (req.body.max_context) n.max_context = req.body.max_context;
+    if (req.body.free !== undefined) n.free = !!req.body.free;
     if (Array.isArray(req.body.capabilities) && req.body.capabilities.length) n.capabilities = req.body.capabilities;
     const nowMs = Date.now();
     const tsS = (ts && ts < 1e12) ? Number(ts) : (nowMs / 1000);
@@ -479,10 +482,13 @@ app.post("/task", async (req, res) => {
   resultsStore.set(task_id, { ts: Date.now(), list: [], est_fee: 0, est_tokens_in: 0, est_tokens_out: 0 });
 
   // 自動扣費 v2：按 tokens 預估。input = prompt 字數估算; output = n_votes × n_predict 上限（保守）
+  // free node：派工目標全 free → 要求者唔 burn（善意分享）
   const EST_CHARS_PER_TOKEN = 3.5;
   const reqTok = req.get("x-swarm-token");
   const tOk = reqTok ? accountForToken(reqTok) : null;
-  if (tOk && reqTok !== NET_TOKEN) {
+  const dispatchList = matches.slice(0, (req.body.max_targets || CONFIG.max_beacon_targets || 5));
+  const targetsAllFree = dispatchList.length > 0 && dispatchList.every(m => m.node.free);
+  if (tOk && reqTok !== NET_TOKEN && !targetsAllFree) {
     const estIn = Math.round(prompt.length / EST_CHARS_PER_TOKEN);
     const estOut = n_votes * 512; // 預估 output (n_predict 多數情況)
     const fee = tokensToCredit(estIn, estOut);
@@ -490,7 +496,7 @@ app.post("/task", async (req, res) => {
     if (bal < fee) return res.status(402).json({ ok: false, error: "SWAI 餘額不足，唔夠出 task", balance: bal, fee, est_tokens_in: estIn, est_tokens_out: estOut });
     ledgerBurn(tOk, fee, task_id, "task_estimate");
   }
-  for (const { node, score } of matches.slice(0, (req.body.max_targets || CONFIG.max_beacon_targets || 5))) {
+  for (const { node, score } of dispatchList) {
     const urlSafe = new RegExp("^https?://(127\.0\.0\.1|100\.|localhost)").test(node.url || "");
     const assignBody = { ...payload, auth: signAssign(payload.task_id, node.node_id), ts: Date.now() };
     try {
@@ -589,16 +595,10 @@ app.post("/v1/chat/completions", async (req, res) => {
     const topTier = mm.tier && mm.tier.length ? mm.tier[0] : "B";
 
     // tier 收費：fast 用 node tier 較高（如 S/A）→ 貴；normal → 平。選 max tier 計費（保守）
+    // free node：targets 全 free → 要求者唔 burn（善意分享）；mixed/付費 → 正常收
     const reqAcc = reqTok ? accountForToken(reqTok) : null;
     let estFee = 0;
-    if (reqAcc && reqTok !== NET_TOKEN) {
-      const estIn = Math.round(prompt.length / 3.5);
-      const estOut = max_tokens;
-      estFee = tokensToCredit(estIn, estOut, tierCharge(topTier));
-      const bal = creditBalance(reqAcc);
-      if (bal < estFee) return res.status(402).json({ error: { message: `SWAI 餘額不足 (balance ${bal}, need ${estFee})` }, type: "insufficient_balance" });
-      ledgerBurn(reqAcc, estFee, null, "v1_chat_estimate");
-    }
+    let freeServed = false;
 
     // 派工：揀符合 modelKey tier + cap 嘅 node
     const wantedTiers = mm.tier;
@@ -612,8 +612,17 @@ app.post("/v1/chat/completions", async (req, res) => {
     console.log(`[v1] sorted=${sorted.map(s=>s.node.node_id+":"+s.score.toFixed(2)).join(",")}`);
     const targets = sorted.slice(0, Math.max(1, mm.n_votes)).map(x => x.node);
     if (!targets.length) {
-      if (reqAcc && reqTok !== NET_TOKEN) ledgerMint(reqAcc, { tokensIn: 0, tokensOut: Math.round(estFee * RATE_OUT), taskId: null, note: "v1_nocap_refund", nodeId: reqAcc, kind: "refund" });
       return res.status(503).json({ error: { message: "no available worker" }, type: "server_error" });
+    }
+    // 收費決定：全 free → 免費（唔 burn）· 有付費 node → 正常估費 burn
+    freeServed = targets.length > 0 && targets.every(t => t.free);
+    if (reqAcc && reqTok !== NET_TOKEN && !freeServed) {
+      const estIn = Math.round(prompt.length / 3.5);
+      const estOut = max_tokens;
+      estFee = tokensToCredit(estIn, estOut, tierCharge(topTier));
+      const bal = creditBalance(reqAcc);
+      if (bal < estFee) return res.status(402).json({ error: { message: `SWAI 餘額不足 (balance ${bal}, need ${estFee})` }, type: "insufficient_balance" });
+      ledgerBurn(reqAcc, estFee, null, "v1_chat_estimate");
     }
     const task_id = crypto.randomUUID();
     const beacon_id = crypto.randomUUID();
@@ -654,7 +663,7 @@ app.post("/v1/chat/completions", async (req, res) => {
       id: task_id, object: "chat.completion", created: Math.floor(Date.now()/1000), model: modelKey,
       choices: [{ index: 0, message: { role: "assistant", content: winner || "" }, finish_reason: winner ? "stop" : "length" }],
       usage: { prompt_tokens: Math.round(prompt.length/3.5), completion_tokens: tout, total_tokens: Math.round(prompt.length/3.5) + tout },
-      swarmai: { nodes: p, votes: (rec?.list || []).map(r => r.node_id), confidence: Number(conf.toFixed(3)), est_fee: estFee, image_routed: hasImage },
+      swarmai: { nodes: p, votes: (rec?.list || []).map(r => r.node_id), confidence: Number(conf.toFixed(3)), est_fee: estFee, free_served: freeServed, image_routed: hasImage },
     });
   } catch (e) {
     res.status(500).json({ error: { message: String(e.message || e).slice(0, 200) }, type: "server_error" });
@@ -713,7 +722,7 @@ app.get("/portal/me", (req, res) => {
   const led = db.prepare("SELECT * FROM ledger WHERE account=? ORDER BY id DESC LIMIT 20").all(u.email);
   const nodes = [...registry.values()].filter(n => n.account === u.email).map(n => ({
     node_id: n.node_id, speed: parseFloat(n.speed) || 0, share_ratio: Math.max(0, Math.min(100, Number(n.share_ratio !== undefined ? n.share_ratio : 100))),
-    tier: nodeTier(n), ctx: n.max_context || 0, model: n.model || "", gpu: n.gpu || "",
+    tier: nodeTier(n), ctx: n.max_context || 0, model: n.model || "", gpu: n.gpu || "", free: !!n.free,
     rating: computeRating(n),
   }));
   const prof = db.prepare("SELECT display_name, pref_model, timezone, sleep_start_hour, sleep_end_hour, share_default, max_budget_per_task FROM users WHERE email=?").get(u.email) || {};
@@ -743,6 +752,19 @@ app.post("/portal/update_profile", (req, res) => {
   const sets = Object.keys(fields).map(k => `${k}=?`).join(",");
   db.prepare(`UPDATE users SET ${sets} WHERE email=?`).run(...Object.values(fields), u.email);
   res.json({ ok: true, profile: fields });
+});
+
+// owner 可開關每個 node 嘅 free（per-node free setting）
+app.post("/portal/node_toggle", (req, res) => {
+  const u = findUserByToken(req.get("x-swarm-token"));
+  if (!u) return res.status(401).json({ ok: false, error: "invalid token" });
+  const { node_id, free } = req.body || {};
+  if (!node_id) return res.status(400).json({ ok: false, error: "node_id required" });
+  const n = registry.get(String(node_id));
+  if (!n) return res.status(404).json({ ok: false, error: "node 唔存在" });
+  if (n.account !== u.email) return res.status(403).json({ ok: false, error: "唔係你嘅 node" });
+  n.free = !!free;
+  res.json({ ok: true, node_id, free: n.free });
 });
 
 app.post("/portal/forgot", (req, res) => {
