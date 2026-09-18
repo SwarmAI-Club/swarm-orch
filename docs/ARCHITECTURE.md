@@ -143,13 +143,15 @@ mint mult = 0.75 + rating/100×0.5；派工 sort 乘 rating
 - idle 免驗真idle → 可能過度申報（時區/法規驗係將來）
 - HA router 未有（單點中央 router；每日 snapshot 備份 ledger.db）
 
-## 10b. Specialty Service 擴展（2026-09-19）— SD-WebUI / Wan / TTS 等非 text LLM
+## 10b. Specialty Service 擴展（2026-09-19）— SD-WebUI / Wan / TTS 等非 text LLM（已實作 v1）
 - **原則：普通用戶安裝一律 text model（Qwythos 等），零選擇**；specialty 由平台自家節點 + 進階用戶選配提供，唔計入一般用戶必修，避免用戶比例失衡。
-- **架構唔使改**：router 派工按 `capabilities` tag 匹配（`reasoning/math/code/vision`…），specialty 只係**新增 tag + MODEL_MAP 條目**：
-  - `image-gen` → SD-WebUI / ComfyUI 工人（能力：文生圖/圖生圖）
-  - `video-gen` → Wan 2.2（TI2V/I2V）、Swan 等視訊模型
-  - `tts` / `audio` → TTS / 語音
-  - 每個 tag = 一個「service 群組」，`MODEL_MAP` 加條目（如 `swarmai-image`、`swarmai-video`）設 tier/n_votes；dedicated `/v1/images/generations` 風格 gateway 係將來（v1 x 做好 text 先）。
-- **Worker 側**：`worker.py` 而家淨識 call `/completion`（text）。specialty worker 只係「另一隻 protocol worker」——同 router 用 `/assign`+`/result` 對接，淨係 completion 改做圖/視訊 API。sandbox Dockerfile 加 `--gpus` + 額外依賴即可。
+- **已實作（2026-09-19）**：
+  - `MODEL_MAP` 加 `swarmai-image`（cap `image-gen`，unitPrice 20 SWAI/job，max_units 4）同 `swarmai-video`（cap `video-gen`，unitPrice 80，max_units 8）；`/v1/models` 自動揭露，唔使改 gateway。
+  - `/v1/images/generations`（OpenAI 相容）：`{model, prompt, n, size}` → 揀單一 `image-gen` node（matchCapabilities）→ 派工（push/pull）→ 等結果（180s）→ 收 `b64_json` → **unit 計費**：用戶 `ledgerBurnChecked`（壓力 daily quota），worker `ledgerMint` units×unitPrice。
+  - **ledger 加 `units` 欄**；`ledgerMint` 支援 `{units, unitPrice}`（units>0 優先代替 tokens 折算）。
+  - **Worker adapter 框架**（worker.py）：`--adapter image|video` + `--capabilities image-gen/video-gen`；`on_assign` 見 body `adapter` 就行 `on_adapter()`（唔行 CoT/llm）。內建 `adapter_image()` call SD-WebUI `/sdapi/v1/txt2img`（`SD_API_URL`），每張＝1 unit 回 `images:[data_uri]`；`adapter_video()` 係 Wan stub（`WAN_API_URL` 未實作）。`--completion` 對 adapter 嚟講係 SD/ComfyUI API 址（唔一定 llama-server）。
+- **新增 specialty worker 上手**：`python3 worker-node/worker.py --router https://swarmai.club/swarm --token <T> --node-id sd-1 --capabilities image-gen --adapter image --completion http://127.0.0.1:7860/sdapi/v1 --pull --heartbeat 30`（SD-WebUI 已起）。用 `swarmai-image` model 落單即接到。
+- **計費語義**：text/vision 照 token（`RATE_IN 5000`/`RATE_OUT 1000`）；specialty 照 **units×unitPrice**（每 job 計，唔係 token）。image/video 收費幾貴由 `SWAI_IMAGE_UNIT_PRICE` / `SWAI_VIDEO_UNIT_PRICE` env 控制。
+- **Worker 側原則**：specialty worker 同 router 一律用 `/assign`+`/result`（HMAC 簽名 + assigned-set 防偽）對接，被 adapter 只係「completion 換成圖/視訊 API」。sandbox Dockerfile 加 `--gpus` + 額外依賴即可。
 - **Vision（現有）**：`qwen-vision` 係平台自家 node（rtx2080ti :8089），`swarmai-vision` 自動分流；唔要求一般用戶裝 VL model。若全網冇 vision node 上線，image 請求先會 503 —— 靠平台 keep ≥1 隻 VL 兜底。
-- **節點設定分層（2026-09-19 起）**：user-level（`users` 表）：display_name / pref_model / timezone / sleep 窗口 / share_default / max_budget_per_task；**node-level（`node_settings` 表）**：free / sleep_start_hour / sleep_end_hour / share_ratio / suspend —— node 有設就覆寫 user 預設（`nodeShareOverride` / `nodeSuspended`），portal `/portal/node_settings` 逐 node 設定。
+- **節點設定分層（2026-09-19 起）**：user-level（`users` 表）：display_name / pref_model / timezone / sleep 窗口 / share_default / max_budget_per_task；**node-level（`node_settings` 表）**：free / sleep_start_hour / sleep_end_hour / share_ratio / suspend / removed —— node 有設就覆寫 user 預設（`nodeShareOverride` / `nodeSuspended` / `nodeRemoved`），portal `/portal/node_settings` 逐 node 設定。
