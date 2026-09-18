@@ -662,23 +662,32 @@ function messagesToPrompt(messages) {
   }
   return parts.join("\n\n");
 }
+// 判斷呢個 request 係咪 agentic/tool-call 類：有 tools schema 或 conversation 已經帶 tool 回合
+function isToolRequest(messages, tools) {
+  if (Array.isArray(tools) && tools.length) return true;
+  for (const m of messages || []) {
+    if (m.role === "tool" || m.role === "function" || Array.isArray(m.tool_calls)) return true;
+  }
+  return false;
+}
 
 app.post("/v1/chat/completions", async (req, res) => {
   try {
-    const { model = "swarmai-normal", messages = [], temperature = 0.6, max_tokens = 512 } = req.body || {};
+    const { model = "swarmai-normal", messages = [], temperature = 0.6, max_tokens = 512, stream = false, tools, tool_choice, stop } = req.body || {};
     if (!Array.isArray(messages) || messages.length === 0)
       return res.status(400).json({ error: { message: "messages required" }, type: "invalid_request_error" });
     const reqTok = req.get("x-swarm-token") || (req.swarmToken || "");
     const hasImage = detectImageInMessages(messages);
+    const useTool = isToolRequest(messages, tools);
     const modelKey = hasImage ? "swarmai-vision" : (MODEL_MAP[model] ? model : "swarmai-normal");
     const mm = MODEL_MAP[modelKey];
-    const prompt = messagesToPrompt(messages);
+    const prompt = useTool ? "" : messagesToPrompt(messages);
     const images = hasImage ? extractImagesFromMessages(messages) : [];
     // context 防護：估算 prompt tokens，對比網絡內 node 最細可用 ctx（保守）
     const estPromptTokens = Math.round(prompt.length / 3.5) + (images.length ? 1024 * images.length : 0);
     const ctxOptions = [...registry.values()].filter(n => n.account && n.max_context > 0).map(n => n.max_context);
     const minCtx = ctxOptions.length ? Math.min(...ctxOptions) : 8192;
-    if (estPromptTokens > minCtx) {
+    if (!useTool && estPromptTokens > minCtx) {
       return res.status(413).json({ error: { message: `prompt 太大（~${estPromptTokens} tokens，網絡上限 ${minCtx}）——建議開新 context/縮短對話`, type: "context_length_exceeded" }, type: "context_length_exceeded" });
     }
     const topTier = mm.tier && mm.tier.length ? mm.tier[0] : "B";
@@ -691,9 +700,10 @@ app.post("/v1/chat/completions", async (req, res) => {
 
     // 派工：揀符合 modelKey tier + cap 嘅 node
     //  freeOnly → 只揀 free node；其他 model（fast/normal）免費 node 都入選（高 grade 優先）
+    //  tool request → 只揀 abilities.tools === true 嘅 node（真工具支援，唔好派去 text-only）
     const wantedTiers = mm.tier;
-    let candidates = [...registry.values()].filter(n => n.account && (mm.freeOnly ? n.free : (wantedTiers.includes(nodeTier(n)) || n.free)));
-    console.log(`[v1] model=${modelKey} caps=${JSON.stringify(mm.cap)} tier=${JSON.stringify(mm.tier)} reg=${registry.size} cand=${candidates.map(c=>c.node_id+":"+nodeTier(c)+(c.free?"(F)":"")).join(",")}`);
+    let candidates = [...registry.values()].filter(n => n.account && (mm.freeOnly ? n.free : (wantedTiers.includes(nodeTier(n)) || n.free)) && (!useTool || (n.abilities && n.abilities.tools === true)));
+    console.log(`[v1] model=${modelKey} tool=${useTool} stream=${stream} caps=${JSON.stringify(mm.cap)} tier=${JSON.stringify(mm.tier)} reg=${registry.size} cand=${candidates.map(c=>c.node_id+":"+nodeTier(c)+(c.free?"(F)":""))}`)
     if (!candidates.length && !mm.freeOnly) {
       candidates = [...registry.values()].filter(n => n.account); // fallback 平價
       console.log(`[v1] fallback all-candidates=${candidates.map(c=>c.node_id).join(",")}`);
@@ -702,7 +712,9 @@ app.post("/v1/chat/completions", async (req, res) => {
     const sorted = matchCapabilities(mm.cap, candidates).sort((a,b) =>
       b.score - a.score || (parseFloat(b.node.speed)||0) - (parseFloat(a.node.speed)||0));
     console.log(`[v1] sorted=${sorted.map(s=>s.node.node_id+":"+s.score.toFixed(2)).join(",")}`);
-    const targets = sorted.slice(0, Math.max(1, mm.n_votes)).map(x => x.node);
+    // tool request 唔適合投票聚合（每個 node 會各自回唔同 tool call）→ 只派單一最佳 node
+    const nTargets = useTool ? 1 : Math.max(1, mm.n_votes);
+    const targets = sorted.slice(0, nTargets).map(x => x.node);
     if (!targets.length) {
       return res.status(503).json({ error: { message: "no available worker" }, type: "server_error" });
     }
@@ -710,7 +722,7 @@ app.post("/v1/chat/completions", async (req, res) => {
     freeServed = mm.freeOnly || targets.some(t => t.free);
     let promoUsed = null;
     if (reqAcc && reqTok !== NET_TOKEN && !freeServed) {
-      const estIn = Math.round(prompt.length / 3.5);
+      const estIn = Math.round((prompt.length || 1000) / 3.5);
       const estOut = max_tokens;
       estFee = tokensToCredit(estIn, estOut, tierCharge(topTier));
       const promoCode = promoFromReq(req);
@@ -721,10 +733,20 @@ app.post("/v1/chat/completions", async (req, res) => {
     }
     const task_id = crypto.randomUUID();
     const beacon_id = crypto.randomUUID();
-    const payload = { task_id, beacon_id, prompt, n_votes: mm.n_votes, temperature, image_data: images.length ? images : undefined };
-    resultsStore.set(task_id, { ts: Date.now(), list: [], est_fee: estFee, est_tokens_in: Math.round(prompt.length/3.5), est_tokens_out: max_tokens, assigned: new Set(targets.map(t=>t.node_id)) });
+    const payload = {
+      task_id, beacon_id, prompt, n_votes: nTargets, temperature,
+      image_data: images.length ? images : undefined,
+      max_tokens, stop: stop || undefined,
+    };
+    if (useTool) {
+      // 工具模式：保留原始 messages（含 tool 回合）+ tools schema 原樣派工
+      payload.chat_messages = messages;
+      if (Array.isArray(tools) && tools.length) payload.tools = tools;
+      if (tool_choice) payload.tool_choice = tool_choice;
+    }
+    resultsStore.set(task_id, { ts: Date.now(), list: [], est_fee: estFee, est_tokens_in: Math.round((prompt.length || 1000)/3.5), est_tokens_out: max_tokens, assigned: new Set(targets.map(t=>t.node_id)) });
     const p = [];
-    console.log(`[v1] targets=${targets.map(t=>t.node_id).join(",")} n_votes=${mm.n_votes}`);
+    console.log(`[v1] targets=${targets.map(t=>t.node_id).join(",")} n_votes=${nTargets} tool=${useTool}`);
     for (const node of targets) {
       try {
         const assignBody = { ...payload, auth: signAssign(payload.task_id, node.node_id) };
@@ -744,11 +766,35 @@ app.post("/v1/chat/completions", async (req, res) => {
       await new Promise(r => setTimeout(r, 300));
     }
     const rec = resultsStore.get(task_id);
-    const tally = {};
-    for (const r of (rec?.list || [])) for (const v of (r.votes || [])) {
-      const ans = String(v.content || "").trim(); tally[ans] = (tally[ans] || 0) + (v.confidence || 0.5);
+
+    let winner = null, conf = 0, toolCalls = null, finishReason = "length";
+    if (useTool) {
+      // tool 模式：取第一個帶 tool_calls 嘅 vote；冇則 fallback 文字
+      for (const r of (rec?.list || [])) {
+        for (const v of (r.votes || [])) {
+          if (Array.isArray(v.tool_calls) && v.tool_calls.length) {
+            toolCalls = v.tool_calls; winner = v.content || ""; finishReason = "tool_calls";
+            conf = Math.max(conf, Number(v.confidence) || 0.5);
+            break;
+          }
+        }
+        if (toolCalls) break;
+      }
+      if (!toolCalls) {
+        for (const r of (rec?.list || [])) for (const v of (r.votes || [])) {
+          const ans = String(v.content || "").trim();
+          if (ans) { winner = ans; conf = Math.max(conf, Number(v.confidence) || 0.5); finishReason = v.finish_reason || "stop"; }
+        }
+      }
+    } else {
+      // 傳統 text 投票聚合
+      const tally = {};
+      for (const r of (rec?.list || [])) for (const v of (r.votes || [])) {
+        const ans = String(v.content || "").trim(); tally[ans] = (tally[ans] || 0) + (v.confidence || 0.5);
+      }
+      const [w, c] = Object.entries(tally).sort((a,b)=>b[1]-a[1])[0] || [null, 0];
+      winner = w; conf = c; finishReason = winner ? (stop ? "stop" : "stop") : "length";
     }
-    const [winner, conf] = Object.entries(tally).sort((a,b)=>b[1]-a[1])[0] || [null, 0];
     // 精算：實際 tokens → 多退
     const tin = (rec?.list || []).reduce((s,r)=>s+(r.tokens_in||0),0);
     const tout = (rec?.list || []).reduce((s,r)=>s+(r.tokens_out||0),0);
@@ -756,12 +802,35 @@ app.post("/v1/chat/completions", async (req, res) => {
       const actual = tokensToCredit(tin, tout, tierCharge(topTier));
       if (estFee > actual) { const d = estFee - actual; ledgerMint(reqAcc, { tokensIn: 0, tokensOut: Math.round(d * RATE_OUT), taskId, note: "v1_refund", nodeId: reqAcc, kind: "refund" }); }
     }
-    res.json({
+
+    const message = { role: "assistant", content: winner || "" };
+    if (toolCalls) message.tool_calls = toolCalls;
+    const bodyObj = {
       id: task_id, object: "chat.completion", created: Math.floor(Date.now()/1000), model: modelKey,
-      choices: [{ index: 0, message: { role: "assistant", content: winner || "" }, finish_reason: winner ? "stop" : "length" }],
-      usage: { prompt_tokens: Math.round(prompt.length/3.5), completion_tokens: tout, total_tokens: Math.round(prompt.length/3.5) + tout },
+      choices: [{ index: 0, message, finish_reason: toolCalls ? "tool_calls" : winner ? (finishReason || "stop") : "length" }],
+      usage: { prompt_tokens: Math.round((prompt.length || 1000)/3.5), completion_tokens: tout, total_tokens: Math.round((prompt.length || 1000)/3.5) + tout },
       swarmai: { nodes: p, votes: (rec?.list || []).map(r => r.node_id), confidence: Number(conf.toFixed(3)), est_fee: estFee, free_served: freeServed, promo_used: promoUsed, image_routed: hasImage },
-    });
+    };
+    if (!stream) return res.json(bodyObj);
+
+    // ---- SSE streaming（OpenAI protocol：delta chunks + finish_reason + [DONE]）
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders?.();
+    const created = Math.floor(Date.now()/1000);
+    const chunk = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+    const base = { id: task_id, object: "chat.completion.chunk", created, model: modelKey };
+    chunk({ ...base, choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }] });
+    if (toolCalls) {
+      chunk({ ...base, choices: [{ index: 0, delta: { tool_calls: toolCalls }, finish_reason: null }] });
+    } else if (winner) {
+      chunk({ ...base, choices: [{ index: 0, delta: { content: winner }, finish_reason: null }] });
+    }
+    chunk({ ...base, choices: [{ index: 0, delta: {}, finish_reason: toolCalls ? "tool_calls" : winner ? "stop" : "length" }] });
+    chunk({ ...base, choices: [], usage: { prompt_tokens: Math.round((prompt.length || 1000)/3.5), completion_tokens: tout, total_tokens: Math.round((prompt.length || 1000)/3.5) + tout } });
+    res.write("data: [DONE]\n\n");
+    res.end();
   } catch (e) {
     res.status(500).json({ error: { message: String(e.message || e).slice(0, 200) }, type: "server_error" });
   }
