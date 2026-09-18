@@ -80,6 +80,11 @@ th{color:var(--acc)}
       </div>
       <div style="margin-top:10px"><div class="muted"><span data-i18n="p_tok_lbl">你嘅 API token（X-Swarm-Token）</span></div><code id="tok">—</code></div>
       <div style="margin-top:8px"><div class="muted"><span data-i18n="p_tok_use">用呢條 token 落 worker：</span><code style="background:#0b1220">--token "&lt;上面&gt;" --node-id &lt;node_id&gt;</code></div></div>
+      <div style="margin-top:10px;display:flex;gap:8px">
+        <input id="coupon-input" placeholder="輸入 Coupon Code（如 WELCOME50）" style="flex:1">
+        <button style="width:auto;padding:9px 16px;margin:0" onclick="redeemCoupon()">兌換</button>
+      </div>
+      <div class="muted" id="coupon-status" style="margin-top:6px"></div>
     </div>
     <div class="card"><div class="muted" style="margin-bottom:8px"><span data-i18n="p_led_lbl">最近分錄（mint/burn）</span></div><pre id="led"><span class="muted" data-i18n="p_loading">loading…</span></pre></div>
     <div class="card"><div class="muted" style="margin-bottom:8px"><span data-i18n="p_keys_lbl">🔑 分享 Keys（每把 Key 都會扣同一個 SWAI 池；可獨立 revoke）</span></div>
@@ -268,6 +273,17 @@ async function toggleNodeFree(){
     if(!d.ok) E('pf-status').textContent='❌ '+d.error;
   }catch(e){}
 }
+async function redeemCoupon(){
+  const code = E('coupon-input').value.trim();
+  if(!code){ E('coupon-status').textContent='請輸入 code'; return; }
+  try{
+    const r = await fetch('/portal/redeem', {method:'POST', headers:{'content-type':'application/json','x-swarm-token':window.__tok}, body: JSON.stringify({code})});
+    const d = await r.json();
+    if(d.ok){ E('coupon-status').textContent = '✅ +'+d.credited+' SWAI 已入帳（現有 '+d.remainingBal+'）'; E('coupon-input').value=''; loadMe(); }
+    else{ E('coupon-status').textContent = '❌ '+(d.error||''); }
+  }catch(e){ E('coupon-status').textContent='❌ '+e; }
+}
+
 async function saveProfile(){
   const body = {
     display_name: E('pf-name').value,

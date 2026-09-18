@@ -110,7 +110,7 @@ function accountForToken(t) {
 const MODEL_MAP = {
   "swarmai-fast":     { cap: ["reasoning", "analysis"], tier: ["S", "A"], n_votes: 3, label: "勁機優先（5090/4090/2080Ti），貴" },
   "swarmai-normal":   { cap: ["reasoning", "math"], tier: ["B", "C"], n_votes: 3, label: "日常平價（3060/2060 及以下）" },
-  "swarmai-fast-vision": { cap: ["vision"], tier: ["S", "A", "B", "C"], n_votes: 1, vision: true, label: "Vision (qwen2.5-vl) 自動分流" },
+  "swarmai-fast-vision": { cap: ["vision"], tier: ["S", "A", "B", "C"], n_votes: 1, vision: true, hidden: true, label: "Vision (auto-route, 唔對外顯示)" },
   "swarmai-free":     { cap: ["reasoning", "math", "analysis"], tier: ["S", "A", "B", "C"], n_votes: 3, freeOnly: true, label: "免費 node（自由分享）——唔扣費" },
 };
 // tier 收費倍率（需求方）同一緊 mint（供應方）用
@@ -200,14 +200,25 @@ db.exec(`CREATE TABLE IF NOT EXISTS user_resets(
 // Pilot 優惠：promo 表 + 開戶送分
 db.exec(`CREATE TABLE IF NOT EXISTS promotions(
   code TEXT PRIMARY KEY,
-  kind TEXT,           -- discount | mint_boost
+  kind TEXT,           -- discount（消費折扣）| reward（兌換即加 token）
   scope TEXT,          -- tier/model/account/all
-  value REAL,
+  value REAL,          -- discount=折扣比(0.5五折)；reward=加幾多 SWAI
   valid_from INTEGER,
   valid_to INTEGER,
   max_uses INTEGER,
-  used INTEGER DEFAULT 0
+  used INTEGER DEFAULT 0,
+  per_user INTEGER DEFAULT 1
 )`);
+db.exec(`CREATE TABLE IF NOT EXISTS promo_uses(
+  email TEXT NOT NULL,
+  code TEXT NOT NULL,
+  ts INTEGER,
+  PRIMARY KEY(email, code)
+)`);
+(function migratePromos() {
+  const cols = db.prepare("PRAGMA table_info(promotions)").all().map(c => c.name);
+  if (!cols.includes("per_user")) db.exec("ALTER TABLE promotions ADD COLUMN per_user INTEGER DEFAULT 1");
+})();
 const SIGNUP_BONUS = Number(process.env.SWARM_SIGNUP_BONUS || 50); // Pilot: 開戶送分
 // per-node owner settings（free 持久化）
 db.exec(`CREATE TABLE IF NOT EXISTS node_settings(
@@ -240,6 +251,20 @@ function applyPromoToFee(code, fee) {
 }
 function promoFromReq(req) {
   return String((req.body && req.body.promo) || req.get("x-swarm-promo") || "").trim();
+}
+// 兌換 promo（reward kind：用咗就加 token 入 account）—— 每人每次限一次、週期內有效
+function redeemPromo(code, email) {
+  const p = promoValid(code);
+  if (!p) return { ok: false, error: "coupon 無效或過期" };
+  if (p.kind !== "reward") return { ok: false, error: "呢張 coupon 唔係兌換型" };
+  if (p.per_user && db.prepare("SELECT 1 FROM promo_uses WHERE email=? AND code=?").get(email, code))
+    return { ok: false, error: "你用過呢張 coupon 喇" };
+  if (p.max_uses && p.used >= p.max_uses) return { ok: false, error: "coupon 已用晒" };
+  const swai = Math.round(p.value || 0);
+  ledgerMint(email, { tokensIn: 0, tokensOut: swai * RATE_OUT, taskId: null, note: `promo_${code}`, nodeId: "", kind: "reward" });
+  db.prepare("INSERT INTO promo_uses(email, code, ts) VALUES(?,?,?)").run(email, code, Date.now());
+  db.prepare("UPDATE promotions SET used = used + 1 WHERE code=?").run(code);
+  return { ok: true, credited: swai, remainingBal: creditBalance(email) };
 }
 db.exec(`CREATE TABLE IF NOT EXISTS user_keys(
   email TEXT NOT NULL,
@@ -581,10 +606,10 @@ app.get("/results/:task_id", (req, res) => {
 
 // ---- OpenAI-compatible gateway ----
 app.get("/v1/models", (req, res) => {
-  const list = Object.entries(MODEL_MAP).map(([id, m]) => ({
+  const list = Object.entries(MODEL_MAP).filter(([, m]) => !m.hidden).map(([id, m]) => ({
     id, object: "model", created: Math.floor(Date.now() / 1000),
     owned_by: "swarmai", description: m.label,
-    swarmai: { n_votes: m.n_votes, vision: !!m.vision, tiers: m.tier },
+    swarmai: { n_votes: m.n_votes, tiers: m.tier },
   }));
   res.json({ object: "list", data: list });
 });
@@ -929,11 +954,20 @@ app.get("/portal/promos", (req, res) => {
 app.post("/admin/promo", (req, res) => {
   const t = req.get("x-swarm-token");
   if (t !== NET_TOKEN) return res.status(403).json({ ok: false, error: "admin only" });
-  const { code, kind, scope, value, valid_from, valid_to, max_uses } = req.body || {};
+  const { code, kind, scope, value, valid_from, valid_to, max_uses, per_user } = req.body || {};
   if (!code) return res.status(400).json({ ok: false, error: "code required" });
-  db.prepare("INSERT INTO promotions(code,kind,scope,value,valid_from,valid_to,max_uses) VALUES(?,?,?,?,?,?,?)")
-    .run(String(code), kind || "discount", scope || "all", Number(value || 1), valid_from || Date.now(), valid_to || null, Number(max_uses || 0));
+  db.prepare("INSERT INTO promotions(code,kind,scope,value,valid_from,valid_to,max_uses,per_user) VALUES(?,?,?,?,?,?,?,?)")
+    .run(String(code), kind || "discount", scope || "all", Number(value || 1), valid_from || Date.now(), valid_to || null, Number(max_uses || 0), Number(per_user === undefined ? 1 : per_user));
   res.json({ ok: true, code });
+});
+
+// 用戶兌換 coupon（reward kind → 加 token）
+app.post("/portal/redeem", (req, res) => {
+  const u = findUserByToken(req.get("x-swarm-token"));
+  if (!u) return res.status(401).json({ ok: false, error: "invalid token" });
+  const code = String((req.body || {}).code || "").trim();
+  if (!code) return res.status(400).json({ ok: false, error: "code required" });
+  res.json(redeemPromo(code, u.email));
 });
 
 
