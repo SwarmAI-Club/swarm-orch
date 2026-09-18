@@ -31,3 +31,10 @@
 ## 5. 敘事
 - 「瞓覺就賺 SWAI，醒來成個網絡幫你算。」
 - 網頁講「挖點數」→ 改「賺 SWAI（token 單位，先 off-chain）」。
+## 6. **Economy v2（2026-09-18 定案）— token-based**
+> 詳見 `docs/ECONOMY.md`。重點：
+> - **1 SWAI = 10,000 tokens** 基底；消耗 input `5000t/SWAI`、output `1000t/SWAI`（output 貴 5x）。
+> - **歸戶**：`credits` key 由 node_id → **account(email)**；5 node 用同一 token 全部 mint 入同一 email balance。
+> - **idle 入帳**：兩次 `IDLE_SHARING` 心跳時差 × node.speed → tokens → mint（修返以前唔入帳 bug）。
+> - **/task 估費 + /vote 精算退款**；`/ledger/mint|burn` 只俾 admin。
+> - 例子：跑 5 node idle 1 日 ≈ 11,000 SWAI；一次 task ≈ 0.1–1 SWAI。
