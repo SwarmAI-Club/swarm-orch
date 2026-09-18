@@ -674,6 +674,13 @@ app.post("/v1/chat/completions", async (req, res) => {
     const mm = MODEL_MAP[modelKey];
     const prompt = messagesToPrompt(messages);
     const images = hasImage ? extractImagesFromMessages(messages) : [];
+    // context 防護：估算 prompt tokens，對比網絡內 node 最細可用 ctx（保守）
+    const estPromptTokens = Math.round(prompt.length / 3.5) + (images.length ? 1024 * images.length : 0);
+    const ctxOptions = [...registry.values()].filter(n => n.account && n.max_context > 0).map(n => n.max_context);
+    const minCtx = ctxOptions.length ? Math.min(...ctxOptions) : 8192;
+    if (estPromptTokens > minCtx) {
+      return res.status(413).json({ error: { message: `prompt 太大（~${estPromptTokens} tokens，網絡上限 ${minCtx}）——建議開新 context/縮短對話`, type: "context_length_exceeded" }, type: "context_length_exceeded" });
+    }
     const topTier = mm.tier && mm.tier.length ? mm.tier[0] : "B";
 
     // tier 收費：fast 用 node tier 較高（如 S/A）→ 貴；normal → 平。選 max tier 計費（保守）
