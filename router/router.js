@@ -245,7 +245,10 @@ function matchCapabilities(required, candidates) {
     .map(n => {
       const base = jaccard(required, n.capabilities);
       const ratio = Math.max(1, Math.min(100, Number(n.share_ratio !== undefined ? n.share_ratio : 100)));
-      return { node: n, score: base * (ratio / 100) };   // ratio 低 → 派工優先度低（防蜂擁）
+      // rating 乘入派工優先（0.75–1.25x）；高分行食多單
+      const rating = computeRating(n).score;
+      const rMult = 0.75 + (rating / 100) * 0.5;
+      return { node: n, score: base * (ratio / 100) * rMult };   // ratio 低 → 派工優先度低（防蜂擁）
     })
     .filter(x => x.score > 0)
     .sort((a, b) => b.score - a.score);
