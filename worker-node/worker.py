@@ -82,6 +82,18 @@ def _headers(args):
         h["x-swarm-token"] = args.token
     return h
 
+def _assign_valid(worker, body):
+    """驗 router 派工簽名（防任何人直撳 /assign 塞 prompt）"""
+    try:
+        import hmac, hashlib
+        task_id = body.get("task_id", "")
+        sig = body.get("auth", "")
+        secret = worker.args.router_secret or worker.args.token
+        expect = hmac.new(str(secret).encode(), f"{task_id}::{worker.args.node_id}".encode(), hashlib.sha256).hexdigest()
+        return sig and hmac.compare_digest(sig, expect)
+    except Exception:
+        return False
+
 class Worker:
     def __init__(self, args):
         self.args = args
@@ -200,6 +212,9 @@ def make_handler(worker):
                 if self.path.startswith("/beacon"):
                     self._json(worker.on_beacon(body))
                 elif self.path.startswith("/assign"):
+                    if not _assign_valid(worker, body):
+                        self._json({"ok": False, "error": "invalid assign auth"}, 403)
+                        return
                     self._json(worker.on_assign(body))
                 else:
                     self._json({"ok": False}, 404)
@@ -219,6 +234,9 @@ def _poll_loop(worker):
             r.raise_for_status()
             tasks = r.json().get("tasks") or []
             for t in tasks:
+                if not _assign_valid(worker, t):
+                    print("[worker] poll task auth fail, skip", file=sys.stderr)
+                    continue
                 worker.on_assign({"task_id": t["task_id"], "beacon_id": t.get("beacon_id"),
                                   "prompt": t.get("prompt", ""), "n_votes": t.get("n_votes", 3),
                                   "temperature": t.get("temperature", 0.6)})
@@ -232,6 +250,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--router", default=os.environ.get("SWARM_ROUTER", "http://100.70.76.100:4900"))
     ap.add_argument("--token", default=os.environ.get("SWARM_API_TOKEN"), help="X-Swarm-Token（router 認證；必填）")
+    ap.add_argument("--router-secret", default=os.environ.get("SWARM_ROUTER_SECRET", ""), help="router 派工簽名 secret（缺省用 token）")
     ap.add_argument("--node-id", default=os.environ.get("HOSTNAME", "node-" + uuid.uuid4().hex[:6]))
     ap.add_argument("--completion", default=os.environ.get("SWARM_COMPLETION"), help="llama-server /completion URL")
     ap.add_argument("--capabilities", nargs="*", default=["reasoning", "math", "analysis"])
