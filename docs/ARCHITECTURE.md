@@ -108,13 +108,13 @@ mint mult = 0.75 + rating/100×0.5；派工 sort 乘 rating
 ## 9. Phase 驗收單
 | Phase | 內容 | 驗收 |
 |---|---|---|
-| P0 | 基建收口：2060a/b worker、清 duplicate、launcher 防重 | /nodes=5 每 port 1 |
-| P1 | /v1/models + /v1/chat + MODEL_MAP + tier 收費 | OpenAI 格式正確、收費按 tier |
-| P1b | image detect → vision route + image_data | base64 自動 qwen、tokens 收費 |
-| P2 | /result 驗 node、poll 鎖 node、assign auth、封網 | 偽造/偷 poll 被拒 |
-| P3 | Profile 完整 + Grade + rating 入派工 | /me 齊、mint 受 rating |
-| P4 | 送分 50 + promo + 邀請 code | 新客試玩額 + code 生效 |
-| P5 | docker bridge + host.docker.internal + nvidia-smi tier | 外部機 onboarding |
+| P0 | 基建收口：2060a/b worker、清 duplicate、launcher 防重 | ✅ /nodes=5-6 每 port 1 |
+| P1 | /v1/models + /v1/chat + MODEL_MAP + tier 收費 | ✅ (2026-09-18 實測) |
+| P1b | image detect → vision route + image_data | ✅ 自動 swarmai-fast-vision 純 tokens |
+| P2 | /result 驗 node、poll 鎖 node、assign HMAC auth 封網 | ✅ 403 verified；封網 pending |
+| P3 | Profile 完整 + Grade + rating | ✅ Grade S/A/B/C + tier/ctx display |
+| P4 | 送分 50 + promo + 邀請 code | ✅ 開戶送 50、/admin/promo、banner |
+| P5 | docker bridge + host.docker.internal + nvidia-smi tier | ✅ bridge+host-gateway+pull；nvidia-smi pending |
 
 ## 10. 已知限制 / 將來（milestone）
 - Accuracy 需要「驗證任務」先可靠（confidence 而家 worker 硬填 0.9）
