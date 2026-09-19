@@ -431,6 +431,7 @@ app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 app.use((req, res, next) => {
   const p0 = req.path;
   if (p0.startsWith("/portal")) return next();
+  if (p0 === "/v1/pay/verify") return next();   // 公開支付核實（只驗 on-chain tx，唔涉 account）
   let t = req.get("x-swarm-token");
   if (!t) {
     // OpenAI-compatible: Authorization: Bearer sk-swai-... or Bearer <token>
@@ -761,10 +762,25 @@ async function scanPolygonTx(tx, account) {
   db.prepare("UPDATE deposits SET amount_usdc=?, swai=?, sender=?, confirmations=?, processed=? WHERE tx_hash=?")
     .run(amountUsdc, swai, "0x" + usdcLog.topics[1].slice(26), confirmations, amountUsdc >= MIN_USDC_TOPUP ? 1 : 0, tx);
   if (amountUsdc >= MIN_USDC_TOPUP) {
-    ledgerMint(account || SYSTEM_ACCOUNT, { tokensIn: 0, tokensOut: swai * RATE_OUT, taskId: null, note: `topup_${tx.slice(0,8)} ${amountUsdc}usdc`, nodeId: "", kind: "deposit" });
+    if (account) {   // 有 account → mint 入帳；冇（純驗證）→ 唔 mint
+      ledgerMint(account, { tokensIn: 0, tokensOut: swai * RATE_OUT, taskId: null, note: `topup_${tx.slice(0,8)} ${amountUsdc}usdc`, nodeId: "", kind: "deposit" });
+    }
   }
   return { amountUsdc, swai, confirmations };
 }
+
+// 公開支付核實（EA 網站用）：只驗證「USDC 有冇轉到收款錢包」；唔使 login、唔 mint account。
+// POST /v1/pay/verify {tx} → {ok, amount_usdc, to_wallet_match}
+app.post("/v1/pay/verify", async (req, res) => {
+  const tx = String((req.body || {}).tx || "").trim();
+  if (!/^0x[0-9a-fA-F]{64}$/.test(tx)) return res.status(400).json({ ok: false, error: "tx hash 格式唔啱" });
+  try {
+    const r = await scanPolygonTx(tx, null);   // account=null → 唔 mint（純驗）
+    res.json({ ok: true, tx, amount_usdc: r.amountUsdc, wallet: depositWallet, match: true });
+  } catch (e) {
+    res.json({ ok: false, error: String(e.message || e) });
+  }
+});
 
 app.get("/credits/:account", (req, res) => {
   const acc = req.params.account;
