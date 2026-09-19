@@ -1292,6 +1292,7 @@ app.post("/portal/signup", (req, res) => {
     .run(e, token, "primary", Date.now(), "full");
   claimNode(node_id, e);
   ensureDepositAddr(e);
+  console.log(`[signup] ${e} -> ${node_id} (ip ${req.connection?.remoteAddress || ''})`);
   // Pilot 開戶送分（試玩額）
   if (SIGNUP_BONUS > 0) {
     ledgerMint(e, { tokensIn: 0, tokensOut: SIGNUP_BONUS * RATE_OUT, taskId: null, note: "welcome_bonus", nodeId: node_id, kind: "manual" });
