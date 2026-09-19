@@ -517,6 +517,11 @@ app.post("/register", (req, res) => {
   if (!node_id) return res.status(400).json({ ok: false, error: "node_id required" });
   const tk = req.get("x-swarm-token");
   const acc = accountForToken(tk) || SYSTEM_ACCOUNT;
+  // SSRF 防護：只有 NET_TOKEN(admin)/平台自身 node 先可以 push（router 主動 fetch 去 node.url）。
+  // 普通 user token 註冊嘅 node → 一律強制 pull（inbox queue），router 唔會 fetch 佢填嘅 url。
+  const isAdmin = tk === NET_TOKEN;
+  const isOwnerAcct = !!nodeOwner(node_id) && nodeOwner(node_id).account === acc;
+  const forcePull = !isAdmin && !isOwnerAcct;
   // P2 綁定：node 只可以屬一個 account。若 node 已被其他 account 註冊 → 拒絕（防冒充）
   const own = nodeOwner(node_id);
   if (own && own.account !== acc) return res.status(403).json({ ok: false, error: `node ${node_id} 已註冊俾 ${own.account}` });
@@ -524,7 +529,7 @@ app.post("/register", (req, res) => {
   const n = registry.get(node_id) || { uptime_s: 0, last_status: null };
   // 重新註冊 = 重裝/換機後再上線 → 清 removed 標記
   db.prepare("UPDATE node_settings SET removed=0 WHERE node_id=?").run(node_id);
-  Object.assign(n, { node_id, capabilities, model, gpu, max_context, speed, url, pull: !!req.body.pull });
+  Object.assign(n, { node_id, capabilities, model, gpu, max_context, speed, url, pull: forcePull ? true : !!req.body.pull });
   const so = nodeShareOverride(node_id);
   n.share_ratio = Math.max(0, Math.min(100, so !== null ? so : (share_ratio !== undefined ? share_ratio : (n.share_ratio || 100))));
   // free：DB owner 設定優先（持久）；無則用 register flag
@@ -556,6 +561,9 @@ app.post("/status", (req, res) => {
     if (!own) claimNode(node_id, acc);
     n = { node_id, uptime_s: 0, last_status: null, capabilities: req.body.capabilities || [], url: "" };
     n.account = acc;
+    // 跟心跳帶嘅 pull（平台 push worker 帶 false；外部 --pull worker 帶 true）。
+    // SSRF 由 dispatch 層 nodePushAddrOK 保證（只會 fetch 去 BIND hosts），確定唔會 fetch 任意 url。
+    n.pull = !!req.body.pull;
     n.speed = req.body.speed || "";
     n.gpu = req.body.gpu || "";
     n.vram = req.body.vram || 0;
@@ -612,6 +620,7 @@ app.post("/beacon", async (req, res) => {
 
   const responses = [];
   for (const { node } of matches.slice(0, CONFIG.max_beacon_targets || 3)) {
+    if (!nodePushAddrOK(node.url)) continue;   // SSRF 防護：beacon 都只 forward 去本機 BIND hosts
     try {
       const r = await fetch(`${node.url}/beacon`, {
         method: "POST",
@@ -803,8 +812,10 @@ setInterval(() => {
 
 // ---- Task orchestration (router-centric: push for LAN, pull for NAT nodes) ----
 async function doDispatch(list, task_id, payload, inbox, push_ok, fail_ok) {
+  // SSRF 防護：router 只會 push（主動 fetch）去「本機 BIND hosts」（平台 workers 都喺 main 上 listen）。
+  // 任何其他網段一律 inbox queue（worker 自己 poll）—— 避免外部用戶用 url 令 router 打內網 / 其他 100.x 機器。
   for (const { node } of list) {
-    const urlSafe = new RegExp("^https?://(127\.0\.0\.1|100\.|localhost)").test(node.url || "");
+    const urlSafe = nodePushAddrOK(node.url);
     const assignBody = { ...payload, auth: signAssign(payload.task_id, node.node_id), ts: Date.now() };
     try {
       if (node.pull || !urlSafe) {
@@ -822,6 +833,13 @@ async function doDispatch(list, task_id, payload, inbox, push_ok, fail_ok) {
       fail_ok && fail_ok({ node_id: node.node_id, error: e.message });
     }
   }
+}
+// SSRF 閘：push 只允許去本機 BIND hosts（平台 worker listeners）；其他一律 inbox
+function nodePushAddrOK(u) {
+  try {
+    const host = new URL(u || "").hostname;
+    return BIND.some(b => b === host);   // 127.0.0.1 / 100.70.76.100（main 自己）
+  } catch (e) { return false; }
 }
 
 app.post("/task", async (req, res) => {
@@ -1089,7 +1107,7 @@ app.post("/v1/chat/completions", async (req, res) => {
     for (const node of targets) {
       try {
         const assignBody = { ...payload, auth: signAssign(payload.task_id, node.node_id) };
-        if (node.pull) {
+        if (node.pull || !nodePushAddrOK(node.url)) {   // SSRF 防護：非本機 BIND hosts 一律 inbox
           const q = inbox.get(node.node_id) || []; q.push(assignBody); inbox.set(node.node_id, q);
         } else {
           await fetch(`${node.url}/assign`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(assignBody), signal: AbortSignal.timeout(90000) });
@@ -1227,7 +1245,7 @@ app.post("/v1/images/generations", async (req, res) => {
     resultsStore.set(task_id, { ts: Date.now(), list: [], est_fee: estFee, units, unit_price: mm.unitPrice, assigned: new Set([target.node_id]) });
     try {
       const assignBody = { ...payload, auth: signAssign(task_id, target.node_id) };
-      if (target.pull) { const q = inbox.get(target.node_id) || []; q.push(assignBody); inbox.set(target.node_id, q); }
+      if (target.pull || !nodePushAddrOK(target.url)) { const q = inbox.get(target.node_id) || []; q.push(assignBody); inbox.set(target.node_id, q); }
       else await fetch(`${target.url}/assign`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(assignBody), signal: AbortSignal.timeout(180000) });
     } catch (e) {
       return res.status(500).json({ error: { message: `image worker 派工失敗：${e.message}`, type: "server_error" } });
