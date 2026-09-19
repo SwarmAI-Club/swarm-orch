@@ -60,7 +60,8 @@ Remote tasks run inside a container that can only reach the router/completion en
 
 Live run (2026-09-17, **5× Qwythos 9B nodes** — main :8087, rtx2080ti :8087, rtx3060 :8080, rtx2060a/b :8087):
 BBH-lite 6-question reasoning, **direct 50% (3/6) → swarm weighted-voting 100% (6/6)** — every question the single model got wrong was corrected by the swarm vote.
-`benchmarks/results/*.json`. (Full BBH/AMC sets: `fetch_bbh.py` / `fetch_amc.py`.)
+
+**Quantity Learn-Study** (2026-09-19): 12 BBH+AMC standard questions × 5 strategies (`benchmarks/run_quantity.py`) — **majority & self-consistency both 11/12 (92%) > direct 10/12 (83%)** → "quantity wins" via both multi-node and same-node sampling; see `docs/QUANTITY_LEARN_STUDY.md`.
 
 ## Public join (no Tailscale needed)
 
@@ -120,7 +121,7 @@ python3 benchmarks/swarm_demo.py # direct vs swarm accuracy
 
 ## Roadmap & Milestones
 
-See [ROADMAP.md](ROADMAP.md). M0–M9 done (protocol v0.2, agent daemon, SWAI token ledger, sandbox, 5×Qwythos demo direct 50%→100%, notebook/privacy+MCP, monitoring+email, token strategy). Outstanding: libp2p transport · WASM sandbox · on-chain settlement (batch) · federated fine-tune (research).
+See [ROADMAP.md](ROADMAP.md). M0–M12 done (protocol v0.2, agent daemon, SWAI ledger, sandbox, 5×Qwythos demo, notebook/privacy+MCP, monitoring, token strategy, platform keys/quota, self-priority+USDC+specialty, vision-only-free, quantity-learn-study). Outstanding: libp2p transport · WASM sandbox · on-chain settlement · federated fine-tune · pay as you go batteries.
 
 ## License
 

@@ -80,14 +80,25 @@ MILESTONES.md（cluster tracker）+ 本 ROADMAP。
 - Portal 充值卡／新增 node modal／時區互補 homepage
 - `docs/ARCHITECTURE.md` §10b/10c/10d + `docs/ECONOMY.md` §10-12 + SUPPORT_BOT.md 社群管家 section
 
+### M11 ✅ 主機私有 + Vision-Only-Free（2026-09-19）— mainpc 唔 share
+- main + qwen-vision workers → **SUSPEND**（唔派工、可還原），main 只做 Router + 私人服務
+- `rtx2080ti-vl`（Qwen2.5-VL :8089, free, vision）primary；`rtx2060a/b`（free + vision）backup
+- **vision-only-free policy**：只有 free node 有 `vision` cap；非 free node 唔 serve vision
+- `agent-core/swarm-workers-start.sh` NODES 更新（加 rtx2080ti-vl、2060a/b +vision、3060/2080ti 冇、main/qwen-vision retained-suspend）
+
+### M12 ✅ 集體智能 Learn-Study（2026-09-19）
+- `benchmarks/run_quantity.py`:12 條 BBH+AMC 標準題 × 5 strategies → majority=11/12、self-consistency=11/12、direct=10/12、verifier=8/12、divergent=7/12
+- 結論：learn-agent 難題用 self-consistency 最經濟提升準確率；`docs/QUANTITY_LEARN_STUDY.md`
+
 ## Out of scope / Later
 - libp2p / NAT punch（Phase 3）
 - ~~Token ledger~~ → SWAI token（M8 定案：off-chain，on-chain 排期）
 - WASM sandbox（先 Docker）
 - Federated fine-tune / speculative decoding over WAN（research，未排期）
-- **USDC 充值自動掃鏈**：MVP 依賴 `/portal/topup/submit`（人手提交 tx）；自動 `setInterval` scan blockchain 係將來
+- **USDC 充值自動掃鏈**：MVP 靠 `/portal/topup/submit`（人手提交 tx）；自動 `setInterval` scan blockchain 係將來
 - Wan/ComfyUI video adapter：stub，待填 `WAN_API_URL` 實作
 - 收益回流聲明（開發/model upgrade/自研 model）網頁承諾：政策層，暫未上網站
+- TTS（Piper）／ SD-WebUI image-gen：睇受歡迎度後再上
 
 ## License
 MIT — free for all. See `LICENSE`.

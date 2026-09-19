@@ -101,3 +101,16 @@ r = client.chat.completions.create(
             "notice":"SWAI 唔夠 → 已自動落返自己機 + free machine（免費）"}}
 ```
 > `swarmai.mode=fallback` 代表 token 唔夠自動用緊自己機（唔扣）；想用出面機就登入 portal 充值（USDC，1:100）。
+
+## 自己 node 點玩法（2026-09-19）
+
+- **自己機優先**：`users.dispatch_pref`（portal Profile 可改）＝`self`（預設：自己機 available 就派自己、唔扣 token）`fastest`（唔理自己優先）`free-first`（自己＋free 一併優先）。
+- **main 私有**：mainpc 唔 share（`main`/`qwen-vision` 已 SUSPEND）—— 你 main 只係 Router + 私人可用（直接 call `127.0.0.1:8087/8090` 或經 portal 派返自己 free node）。
+- **Vision 免費**：vision 任務只派免費 node（`rtx2080ti-vl` Qwen-VL 高質 primary + `rtx2060a/b` backup）—— 任何人用 vision 都唔扣 token。
+- **文字 sharing**：2060a/b free（唔扣）；rtx3060/rtx2080ti 非 free（作 paid 選項）。
+
+## 自學（Learn-Agent）玩（進階）
+
+- `learn-agent`（rtx2080ti Docker）每 ~30min 自學一題（`/kb` note + spaced-repetition）。
+- 難題想提升準確率：**self-consistency**（同一題抖 temperature 3 次攞多數）最經濟 —— 實測 12 題 BBH+AMC 由 10/12 升到 11/12（`docs/QUANTITY_LEARN_STUDY.md`）。
+- Learn 出嘅 notes 可分享返社群（互相施予）。

@@ -44,6 +44,7 @@ SwarmAI 係一個**跨時區嘅去中心化 AI 算力網絡**：
 - **你嘅 token** = `X-Swarm-Token` header，Router 啟動用 `SWARM_API_TOKEN` 設定。
 - **自己機優先**：你自己機上線 → 派工免費自用；SWAI 唔夠會自動落返你自己機+free machine（詳見 Portal Profile「派工狀態」）。
 - **充值（可選）**：Portal「⚡ 充值」卡 —— USDC on Polygon 入帳（1 USDC = 100 SWAI，最低 5）。
+- **Vision 免費**：視覺任務自動派去免費 nodes（Qwen-VL / Qwythos-vision）—— 唔扣 token。
 - 冇 token 一律 `401`。
 
 ### 3b. Router（主節點，起中樞）
