@@ -6,6 +6,8 @@
 「**瞓覺時借 GPU、醒來成個網絡幫你**」— 跨時區、異步的去中心化 AI 算力網絡。
 家用 GPU 喺各自時區嘅深夜/空閒時間共享算力（Proof-of-Uptime），日頭反過來呼叫其他時區嘅算力 — 達致「**算力民主化**」，對抗集中式雲端算力壟斷。
 
+**社群憲章（願景宣言）**：用家建立自己嘅 AI 互助網絡平台，用各自嘅 idle 時間產生最大效益。唔需要最頂尖嘅 agent —— 只要有人肯喺現有基礎上砌落去，SwarmAI Club 以健康正面維度、以量擴展，不斷升級、優化群組體驗，本著互助同理之心向未來邁進。**有心砌，就係會員。**
+
 ## Design Decisions（來自設計 review 2026-09-17）
 - **方案 B（Multi-agent 任務分派）為先** — 家用網絡 latency/bandwidth 限制下，Layer sharding（方案 A）唔實際；swarm-orch 已經係方案 B（Node router + Python worker）
 - **三語 messages**：`node_register` / `beacon` / `beacon_response` / `task_assign` / `task_result`（`protocol/messages.json`），Phase 2 加 `node_status`（heartbeat）
