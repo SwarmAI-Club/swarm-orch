@@ -117,6 +117,13 @@ def main():
         reg = any(n.get("node_id") == f"{nid}-inst" for n in (nodes if isinstance(nodes, list) else []))
         check("worker 心跳註冊咗", reg, f"registered node={f'{nid}-inst'}")
         proc.terminate()
+        time.sleep(1)
+        # 清理：用 test user 自己 token remove（唔留殘留 node 喺 registry）
+        try:
+            http_json(f"{base}/portal/node_remove", {"node_id": f"{nid}-inst"}, token=tok, timeout=15)
+            print("  🧹 已清理 test worker node")
+        except Exception as e:
+            print(f"  ⚠️ node 清理 fail: {e}")
     else:
         print("  (skip — 用 --worker 1 啟動真 worker 驗證)")
 

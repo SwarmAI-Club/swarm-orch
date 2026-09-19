@@ -1429,6 +1429,18 @@ app.post("/portal/node_remove", (req, res) => {
   res.json({ ok: true, node_id, removed: true, hint: "重新裝返同一 node_id 就會自動啟用；想用新機新名 → 裝新 worker 用新 --node-id" });
 });
 
+// Admin 專用清理（NET_TOKEN only）—— 俾 smoke test / 監察清走測試 node
+app.post("/admin/node_remove", (req, res) => {
+  const tk = req.get("x-swarm-token");
+  if (tk !== NET_TOKEN) return res.status(403).json({ ok: false, error: "admin only" });
+  const node_id = String((req.body || {}).node_id || "");
+  if (!node_id) return res.status(400).json({ ok: false, error: "node_id required" });
+  registry.delete(node_id);
+  db.prepare("UPDATE node_settings SET removed=1, updated=? WHERE node_id=?").run(Date.now(), node_id);
+  console.log(`[admin node_remove] ${node_id}`);
+  res.json({ ok: true, node_id, removed: true, admin: true });
+});
+
 // 重新啟用被移除嘅 node（重裝後第一次 register 會自動 re-enable；呢個 endpoint 係俾 portal 一鍵)
 app.post("/portal/node_enable", (req, res) => {
   const u = findUserByToken(req.get("x-swarm-token"));
