@@ -153,6 +153,13 @@ mint mult = 0.75 + rating/100×0.5；派工 sort 乘 rating
 - **新增 specialty worker 上手**：`python3 worker-node/worker.py --router https://swarmai.club/swarm --token <T> --node-id sd-1 --capabilities image-gen --adapter image --completion http://127.0.0.1:7860/sdapi/v1 --pull --heartbeat 30`（SD-WebUI 已起）。用 `swarmai-image` model 落單即接到。
 - **計費語義**：text/vision 照 token（`RATE_IN 5000`/`RATE_OUT 1000`）；specialty 照 **units×unitPrice**（每 job 計，唔係 token）。image/video 收費幾貴由 `SWAI_IMAGE_UNIT_PRICE` / `SWAI_VIDEO_UNIT_PRICE` env 控制。
 
+## 10d. 自己機優先經濟 + USDC 充值（2026-09-19 實作）
+- **自己機優先（dispatch_pref）**：`users.dispatch_pref` = `self`（default，自己機 available 就派自己）| `fastest`（唔理自己優先）| `free-first`（自己＋free 一併優先）。`matchCapabilities` 收到 `reqAcc`：自己 account 嘅 node score ×1.5。
+- **收費三層**：① 全部自己機 → `self` 唔 burn；② 有 free node 參與 → `free` 唔 burn；③ 出面機 → `paid` burn（tokens/units×tier）。balance 或 quota 唔夠 → **fallback 落自己機＋free node（免費照做）**，response 帶 `mode:"fallback"` + notice；真冇先 402/429。
+- **API 顯示**：`/v1/chat`、`/task`、`/v1/images` response 加 `mode`（self/paid/fallback/free）+ `notice`；`/portal/me` 有 `dispatch:{pref,mode,notice}` + `topup:{wallet,rate,min}`。
+- **離線偵測**：`nodeOnline()`（>5min 冇心跳 = offline）；`matchCapabilities` filter offline；`/portal/me` nodes 帶 `online` + `last_seen_min`。唔 auto-purge（portal 手動移除）。
+- **USDC on Polygon 充值**：`deposits` 表；`/portal/topup` 顯示收款地址（`SWARM_DEPOSIT_WALLET`）+ 兌換率（`SWAI_USDC_RATE` default 100）；`/portal/topup/submit` 提交 tx → `scanPolygonTx`（`eth_getTransactionReceipt` 掃 USDC `Transfer` event，`POLYGON_USDC` contract）→ confirmations ≥1 且 amount≥`MIN_USDC_TOPUP`(5) → `ledgerMint` kind=`deposit`。MVP 用 public RPC（`POLYGON_RPC`）。
+
 ## 10c. 用戶私隱（2026-09-19 起明列保證）
 - **Data minimization（默認唔留）**：任務 prompt / AI 輸出結果**唔寫落任何 DB**（`ledger.db` 只有 users/credits/ledger/node_settings/daily_usage 等營運數據，冇任務內容表）。Router 處理過程用 in-memory `resultsStore`，結算完成後自動清（10min sweep），router restart 即全部消失。
 - **Log 淨係營運 metadata**：router log 只記錄 node_id / model / units / 派工結果，**唔含 prompt / 答案內容**（2026-09-19 審查 + 移除 `[img]` prompt head 洩漏）。worker log 唔含 prompt。

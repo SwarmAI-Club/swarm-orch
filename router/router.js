@@ -15,6 +15,12 @@ const RATE_IN = Number(process.env.SWAI_RATE_IN || 5000);          // 1 SWAI cha
 const RATE_OUT = Number(process.env.SWAI_RATE_OUT || 1000);        // 1 SWAI charges per N OUTPUT tokens (貴 5x)
 const IMAGE_UNIT_PRICE = Number(process.env.SWAI_IMAGE_UNIT_PRICE || 20);   // image-gen 每 job unit→SWAI
 const VIDEO_UNIT_PRICE = Number(process.env.SWAI_VIDEO_UNIT_PRICE || 80);   // video-gen 每 job unit→SWAI
+// ---- USDC on Polygon 充值 ----
+const USDC_TO_SWAI = Number(process.env.SWAI_USDC_RATE || 100);            // 1 USDC = 100 SWAI
+const MIN_USDC_TOPUP = Number(process.env.SWAI_MIN_USDC || 5);              // 最低充值（USDC）
+const USDC_CONTRACT = process.env.POLYGON_USDC || "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359"; // USDC.e / native USDC on Polygon
+const POLYGON_RPC = process.env.POLYGON_RPC || "https://polygon-rpc.com";
+const depositWallet = process.env.SWARM_DEPOSIT_WALLET || "";               // 你嘅 USDC 收款地址（single-address plan）
 const SYSTEM_ACCOUNT = "^system^";                                  // NET_TOKEN 用 account（monitor/admin）
 
 // SMTP (forgot-password) — env 或 swarm-support-bot.env
@@ -221,8 +227,20 @@ db.exec(`CREATE TABLE IF NOT EXISTS users(
   if (!cols.includes("sleep_end_hour")) adds.push("sleep_end_hour INTEGER DEFAULT 7");
   if (!cols.includes("share_default")) adds.push("share_default INTEGER DEFAULT 100");
   if (!cols.includes("max_budget_per_task")) adds.push("max_budget_per_task INTEGER DEFAULT 0");
+  if (!cols.includes("dispatch_pref")) adds.push("dispatch_pref TEXT DEFAULT 'self'");
+  if (!cols.includes("usdc_deposit_addr")) adds.push("usdc_deposit_addr TEXT");
   for (const a of adds) db.exec(`ALTER TABLE users ADD COLUMN ${a}`);
 })();
+db.exec(`CREATE TABLE IF NOT EXISTS deposits(
+  tx_hash TEXT PRIMARY KEY,
+  account TEXT NOT NULL,
+  sender TEXT NOT NULL,
+  amount_usdc REAL DEFAULT 0,
+  swai INTEGER DEFAULT 0,
+  ts INTEGER,
+  confirmations INTEGER DEFAULT 0,
+  processed INTEGER DEFAULT 0
+)`);
 db.exec(`CREATE TABLE IF NOT EXISTS user_resets(
   email TEXT,
   code TEXT PRIMARY KEY,
@@ -355,6 +373,18 @@ function hashPass(p) { return crypto.scryptSync(String(p), "swaimail", 32).toStr
 function mkNodeId(email) {
   return "client-" + String(email).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32);
 }
+// 每 user 一條 deterministic「充值代號」——user 轉 USDC 時喺 tx note/memo 或轉返自己名下地址辨識。
+// 方案 A（單一接收地址）：用 deposit_wallet + sender 自動 bind；此處只做 memo 標記（'' = 唔需要）
+function mkDepositRef(email) {
+  return crypto.createHash("sha256").update(email + process.env.SWARM_DEPOSIT_SALT || "swarm").digest("hex").slice(0, 16);
+}
+function ensureDepositAddr(email) {
+  const row = db.prepare("SELECT usdc_deposit_addr FROM users WHERE email=?").get(email) || {};
+  if (row.usdc_deposit_addr) return row.usdc_deposit_addr;
+  const addr = mkDepositRef(email);
+  db.prepare("UPDATE users SET usdc_deposit_addr=? WHERE email=?").run(addr, email);
+  return addr;
+}
 function mkToken() { return "swai-" + crypto.randomBytes(16).toString("hex"); }
 function findUserByToken(t) {
   return db.prepare("SELECT u.email, u.node_id, u.created AS acct_created, k.token, k.label, k.scope, k.last_used_at, k.last_ip FROM user_keys k JOIN users u ON u.email=k.email WHERE k.token=?").get(String(t));
@@ -438,10 +468,35 @@ function jaccard(a, b) {
   return inter / new Set([...A, ...B]).size;
 }
 
-function matchCapabilities(required, candidates) {
+// ---- 離線偵測：>5min 冇心跳 = offline（唔派工）----
+const NODE_STALE_MS = Number(process.env.SWARM_NODE_STALE_MS || 5 * 60 * 1000);
+function nodeOnline(n) {
+  if (!n) return false;
+  const last = n.last_status && n.last_status.__tsMs;
+  return !!last && (Date.now() - last) < NODE_STALE_MS;
+}
+function nodeLastSeenMin(n) {
+  const last = n.last_status && n.last_status.__tsMs;
+  if (!last) return null;
+  return Math.round((Date.now() - last) / 60000);
+}
+// ---- User dispatch_pref：self（自己機優先，default）| fastest（唔理自己優先）| free-first（自己+free 一併優先）----
+function dispatchPrefFor(email) {
+  if (!email) return "self";
+  const r = db.prepare("SELECT dispatch_pref FROM users WHERE email=?").get(email);
+  return (r && r.dispatch_pref) || "self";
+}
+// 自己 account 嘅機（註冊咗嘅 active node）
+function myNodes(account) {
+  return [...registry.values()].filter(n => n.account === account && nodeOnline(n));
+}
+
+function matchCapabilities(required, candidates, reqAcc) {
+  const pref = dispatchPrefFor(reqAcc);
   return candidates
     .filter(n => Array.isArray(n.capabilities))
     .filter(n => n.node_id ? !nodeSuspended(n.node_id) : true)   // suspend 唔接工
+    .filter(n => nodeOnline(n))                                    // 離線唔派工
     .map(n => {
       const base = jaccard(required, n.capabilities);
       const ov = nodeShareOverride(n.node_id);
@@ -449,7 +504,9 @@ function matchCapabilities(required, candidates) {
       // rating 乘入派工優先（0.75–1.25x）；高分行食多單
       const rating = computeRating(n).score;
       const rMult = 0.75 + (rating / 100) * 0.5;
-      return { node: n, score: base * (ratio / 100) * rMult };   // ratio 低 → 派工優先度低（防蜂擁）
+      // 自己機優先：self / free-first 加權 1.5x
+      const ownMult = (reqAcc && n.account === reqAcc && pref !== "fastest") ? 1.5 : 1.0;
+      return { node: n, score: base * (ratio / 100) * rMult * ownMult };   // ratio 低 → 派工優先度低（防蜂擁）
     })
     .filter(x => x.score > 0)
     .sort((a, b) => b.score - a.score);
@@ -551,7 +608,7 @@ app.post("/status", (req, res) => {
 app.post("/beacon", async (req, res) => {
   const { task, required_capabilities, priority = 1, deadline } = req.body;
   const beacon_id = crypto.randomUUID();
-  const matches = matchCapabilities(required_capabilities, [...registry.values()]);
+  const matches = matchCapabilities(required_capabilities, [...registry.values()], accountForToken(req.get("x-swarm-token")));
 
   const responses = [];
   for (const { node } of matches.slice(0, CONFIG.max_beacon_targets || 3)) {
@@ -640,6 +697,66 @@ app.post("/ledger/burn", (req, res) => {
   res.json({ ok: true, account, burned: actual, balance: creditBalance(account) });
 });
 
+// ---- USDC on Polygon 充值（方案 A：單一接收地址＋sender 自動 bind / 人手 tx 核實）----
+app.get("/portal/topup", (req, res) => {
+  const u = findUserByToken(req.get("x-swarm-token"));
+  if (!u) return res.status(401).json({ ok: false, error: "invalid token" });
+  const addr = ensureDepositAddr(u.email);
+  const pending = db.prepare("SELECT tx_hash, amount_usdc, confirmations, processed FROM deposits WHERE account=? ORDER BY ts DESC LIMIT 10").all(u.email);
+  res.json({
+    ok: true, wallet: depositWallet || null, min_usdc: MIN_USDC_TOPUP, rate: USDC_TO_SWAI, // 1 USDC = N SWAI
+    deposit_addr: addr, steps: [
+      "1) 攞你左邊而家嘅 USDC 地址，或直接睇返你 profile topup 卡",
+      `2) 於任何錢包（MetaMask/Trust/交易所）轉 USDC (Polygon 網絡) 到收款地址，最）${MIN_USDC_TOPUP} USDC`,
+      "3) 網絡確認後，喺度撳「我已轉帳」輸入 tx hash，或等我自動掃描入帳",
+    ],
+    pending,
+  });
+});
+
+app.post("/portal/topup/submit", async (req, res) => {
+  const u = findUserByToken(req.get("x-swarm-token"));
+  if (!u) return res.status(401).json({ ok: false, error: "invalid token" });
+  const tx = String((req.body || {}).tx || "").trim();
+  if (!/^0x[0-9a-fA-F]{64}$/.test(tx)) return res.status(400).json({ ok: false, error: "tx hash 格式唔啱（0x…64 hex）" });
+  const exists = (db.prepare("SELECT account FROM deposits WHERE tx_hash=?").get(tx) || {}).account;
+  if (exists) return res.status(409).json({ ok: false, error: "呢個 tx 已有人提交過" });
+  db.prepare("INSERT INTO deposits(tx_hash,account,sender,amount_usdc,swai,ts,confirmations,processed) VALUES(?,?,?,0,0,?,0,0)")
+    .run(tx, u.email, "", Date.now());
+  // 拉 tx 資料（Polygon RPC eth_getTransactionReceipt）——approve/清掃可選；MVP：人手確認或者用 rpc
+  try {
+    await scanPolygonTx(tx, u.email);
+  } catch (e) { console.log("[topup] verify deferred:", e.message); }
+  const row = db.prepare("SELECT amount_usdc, swai, confirmations, processed FROM deposits WHERE tx_hash=?").get(tx);
+  res.json({ ok: true, tx, status: row.processed ? "credited" : "pending", amount_usdc: row.amount_usdc, swai: row.swai });
+});
+
+// 掃描 Polygon：攞 tx receipt，睇係咪 USDC Transfer 去 depositWallet
+async function scanPolygonTx(tx, account) {
+  if (!depositWallet) throw new Error("SWARM_DEPOSIT_WALLET 未設（收款地址）");
+  const zh = { jsonrpc: "2.0", id: 1, method: "eth_getTransactionReceipt", params: [tx] };
+  const r = await fetch(POLYGON_RPC, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(zh), signal: AbortSignal.timeout(15000) });
+  const j = await r.json();
+  const rec = j.result;
+  if (!rec) throw new Error("tx 未確認或唔存在");
+  const logs = rec.logs || [];
+  const usdcLog = logs.find(l => l.address && l.address.toLowerCase() === USDC_CONTRACT.toLowerCase() && l.topics && l.topics[0] === "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef");
+  if (!usdcLog) throw new Error("唔係 USDC Transfer");
+  // topics[1]=from, topics[2]=to（address）
+  const to = "0x" + usdcLog.topics[2].slice(26);
+  if (to.toLowerCase() !== depositWallet.toLowerCase()) throw new Error("收件地址唔係我哋錢包");
+  const amountHex = usdcLog.data;
+  const amountUsdc = Number(BigInt("0x" + amountHex) / 1000000n) ;
+  const swai = Math.floor(amountUsdc * USDC_TO_SWAI);
+  const confirmations = Number(rec.blockNumber || 0);
+  db.prepare("UPDATE deposits SET amount_usdc=?, swai=?, sender=?, confirmations=?, processed=? WHERE tx_hash=?")
+    .run(amountUsdc, swai, "0x" + usdcLog.topics[1].slice(26), confirmations, amountUsdc >= MIN_USDC_TOPUP ? 1 : 0, tx);
+  if (amountUsdc >= MIN_USDC_TOPUP) {
+    ledgerMint(account || SYSTEM_ACCOUNT, { tokensIn: 0, tokensOut: swai * RATE_OUT, taskId: null, note: `topup_${tx.slice(0,8)} ${amountUsdc}usdc`, nodeId: "", kind: "deposit" });
+  }
+  return { amountUsdc, swai, confirmations };
+}
+
 app.get("/credits/:account", (req, res) => {
   const acc = req.params.account;
   // 全部屬於呢個 account 嘅 node + 各自 ratio/speed（查詢時明列計法）
@@ -685,39 +802,8 @@ setInterval(() => {
 
 
 // ---- Task orchestration (router-centric: push for LAN, pull for NAT nodes) ----
-app.post("/task", async (req, res) => {
-  const { beacon_id, prompt, required_capabilities = ["reasoning"], n_votes = 3, temperature = 0.6 } = req.body || {};
-  if (!prompt) return res.status(400).json({ ok: false, error: "prompt required" });
-  const MAX_PROMPT = Number(process.env.SWARM_MAX_PROMPT || 8000);
-  if (prompt.length > MAX_PROMPT) return res.status(413).json({ ok: false, error: "prompt 太長" });
-  const bid = beacon_id || crypto.randomUUID();
-  const task_id = crypto.randomUUID();
-  const matches = matchCapabilities(required_capabilities, [...registry.values()]);
-  const pushed = [], queued = [], failed = [];
-  const payload = { task_id, beacon_id: bid, prompt, n_votes, temperature };
-  resultsStore.set(task_id, { ts: Date.now(), list: [], est_fee: 0, est_tokens_in: 0, est_tokens_out: 0 });
-
-  // 自動扣費 v2：按 tokens 預估。input = prompt 字數估算; output = n_votes × n_predict 上限（保守）
-  // free node：派工目標全 free → 要求者唔 burn（善意分享）
-  const EST_CHARS_PER_TOKEN = 3.5;
-  const reqTok = req.get("x-swarm-token");
-  const tOk = reqTok ? accountForToken(reqTok) : null;
-  const dispatchList = matches.slice(0, (req.body.max_targets || CONFIG.max_beacon_targets || 5));
-  const targetsAllFree = dispatchList.length > 0 && dispatchList.some(m => m.node.free);
-  let promoUsed = null;
-  if (tOk && reqTok !== NET_TOKEN && !targetsAllFree) {
-    const estIn = Math.round(prompt.length / EST_CHARS_PER_TOKEN);
-    const estOut = n_votes * 512; // 預估 output (n_predict 多數情況)
-    let fee = tokensToCredit(estIn, estOut);
-    const promoCode = promoFromReq(req);
-    if (promoCode) { const r = applyPromoToFee(promoCode, fee); fee = r.fee; promoUsed = r.promo; }
-    const bal = creditBalance(tOk);
-    if (bal < fee) return res.status(402).json({ ok: false, error: "SWAI 餘額不足，唔夠出 task", balance: bal, fee, est_tokens_in: estIn, est_tokens_out: estOut });
-    const qRem = dailyQuotaRemaining(tOk);
-    if (fee > qRem) return res.status(429).json({ ok: false, error: `今日 burn 上限已到 / 剩餘唔夠（每日上限 ${DAILY_BURN_CAP} SWAI，今日剩 ${qRem}）`, daily_cap: DAILY_BURN_CAP, daily_remaining: qRem, need: fee });
-    ledgerBurnChecked(tOk, fee, task_id, "task_estimate");
-  }
-  for (const { node, score } of dispatchList) {
+async function doDispatch(list, task_id, payload, inbox, push_ok, fail_ok) {
+  for (const { node } of list) {
     const urlSafe = new RegExp("^https?://(127\.0\.0\.1|100\.|localhost)").test(node.url || "");
     const assignBody = { ...payload, auth: signAssign(payload.task_id, node.node_id), ts: Date.now() };
     try {
@@ -725,18 +811,92 @@ app.post("/task", async (req, res) => {
         const q = inbox.get(node.node_id) || [];
         q.push(assignBody);
         inbox.set(node.node_id, q);
-        queued.push({ node_id: node.node_id, pull: true });
+        push_ok && push_ok({ node_id: node.node_id, pull: true });
       } else {
         await fetch(`${node.url}/assign`, { method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(assignBody), signal: AbortSignal.timeout(60000) });
-        pushed.push({ node_id: node.node_id, pull: false });
+        push_ok && push_ok({ node_id: node.node_id, pull: false });
       }
     } catch (e) {
-      failed.push({ node_id: node.node_id, error: e.message });
+      fail_ok && fail_ok({ node_id: node.node_id, error: e.message });
     }
   }
-  res.json({ ok: true, task_id, beacon_id: bid, pushed, queued, failed, promo_used: promoUsed });
+}
+
+app.post("/task", async (req, res) => {
+  const { beacon_id, prompt, required_capabilities = ["reasoning"], n_votes = 3, temperature = 0.6 } = req.body || {};
+  if (!prompt) return res.status(400).json({ ok: false, error: "prompt required" });
+  const MAX_PROMPT = Number(process.env.SWARM_MAX_PROMPT || 8000);
+  if (prompt.length > MAX_PROMPT) return res.status(413).json({ ok: false, error: "prompt 太長" });
+  const bid = beacon_id || crypto.randomUUID();
+  const task_id = crypto.randomUUID();
+  const reqTok = req.get("x-swarm-token");
+  const tOk = reqTok ? accountForToken(reqTok) : null;
+  const matches = matchCapabilities(required_capabilities, [...registry.values()], tOk);
+  const pushed = [], queued = [], failed = [];
+  const payload = { task_id, beacon_id: bid, prompt, n_votes, temperature };
+  resultsStore.set(task_id, { ts: Date.now(), list: [], est_fee: 0, est_tokens_in: 0, est_tokens_out: 0 });
+
+  // 自動扣費 v2：按 tokens 預估。input = prompt 字數估算; output = n_votes × n_predict 上限（保守）
+  // 自己機優先：全部自己機 → 唔 burn；部分出面 → 照收；balance 唔夠 → fallback 落自己機+free node
+  const EST_CHARS_PER_TOKEN = 3.5;
+  let dispatchList = matches.slice(0, (req.body.max_targets || CONFIG.max_beacon_targets || 5));
+  const selfNodes = dispatchList.filter(m => tOk && m.node.account === tOk);
+  const externalNodes = dispatchList.filter(m => !tOk || m.node.account !== tOk);
+  const freeNodes = dispatchList.filter(m => m.node.free || (m.node.account === tOk));
+  // 自己機優先：pref != fastest 且有自己機上線 → 只派自己機（佢唔夠用先落到出面）
+  // pref=free-first：自己機好缺時，free node 都一併優先（唔扣 token）
+  const pref = dispatchPrefFor(tOk);
+  if (tOk && pref === "free-first") {
+    const awsNodes = matches.slice(0, (req.body.max_targets || CONFIG.max_beacon_targets || 5));
+    const fl = awsNodes.filter(m => m.node.account === tOk || m.node.free);
+    if (fl.length) dispatchList = fl;
+  } else if (tOk && pref !== "fastest" && selfNodes.length) {
+    dispatchList = selfNodes;
+  }
+  const allSelf = dispatchList.length > 0 && selfNodes.length === dispatchList.length;
+  const hasAnyFallback = freeNodes.length > 0;       // token 唔夠時可用嘅免費通道
+  let dispatchMode = "self";                          // self | paid | fallback
+  let promoUsed = null;
+  const estIn = Math.round(prompt.length / EST_CHARS_PER_TOKEN);
+  const estOut = n_votes * 512;
+  let fee = tokensToCredit(estIn, estOut);
+  if (tOk && reqTok !== NET_TOKEN && !allSelf) {
+    const promoCode = promoFromReq(req);
+    if (promoCode) { const r = applyPromoToFee(promoCode, fee); fee = r.fee; promoUsed = r.promo; }
+    const bal = creditBalance(tOk);
+    if (bal < fee) {
+      // 唔夠 token → 睇有冇自己機/free machine 兜底 → fallback（免費照做）；冇 → 402
+      if (hasAnyFallback) {
+        dispatchMode = "fallback";
+        const fallbackList = matches.slice(0, (req.body.max_targets || CONFIG.max_beacon_targets || 5))
+          .filter(m => m.node.free || (tOk && m.node.account === tOk));
+        resultsStore.set(task_id, { ts: Date.now(), list: [], est_fee: 0, est_tokens_in: estIn, est_tokens_out: estOut, fallback: true, assigned: new Set(fallbackList.map(x => x.node.node_id)) });
+        await doDispatch(fallbackList, task_id, payload, inbox, x => queued.push(x), x => failed.push(x));
+        return res.json({ ok: true, task_id, beacon_id: bid, mode: "fallback", notice: "SWAI 唔夠 → 已自動落返自己機 / free machine（免費）", pushed, queued, failed, promo_used: null });
+      }
+      return res.status(402).json({ ok: false, error: "SWAI 餘額不足，唔夠出 task", balance: bal, fee, est_tokens_in: estIn, est_tokens_out: estOut });
+    }
+    const qRem = dailyQuotaRemaining(tOk);
+    if (fee > qRem) {
+      if (hasAnyFallback) {
+        dispatchMode = "fallback";
+        const fallbackList = matches.slice(0, (req.body.max_targets || CONFIG.max_beacon_targets || 5))
+          .filter(m => m.node.free || (tOk && m.node.account === tOk));
+        resultsStore.set(task_id, { ts: Date.now(), list: [], est_fee: 0, est_tokens_in: estIn, est_tokens_out: estOut, fallback: true, assigned: new Set(fallbackList.map(x => x.node.node_id)) });
+        await doDispatch(fallbackList, task_id, payload, inbox, x => queued.push(x), x => failed.push(x));
+        return res.json({ ok: true, task_id, beacon_id: bid, mode: "fallback", notice: `今日 quota 到頂 → 已自動落返自己機 / free machine（每日上限 ${DAILY_BURN_CAP}）`, pushed, queued, failed, promo_used: null });
+      }
+      return res.status(429).json({ ok: false, error: `今日 burn 上限已到 / 剩餘唔夠（每日上限 ${DAILY_BURN_CAP} SWAI，今日剩 ${qRem}）`, daily_cap: DAILY_BURN_CAP, daily_remaining: qRem, need: fee });
+    }
+    ledgerBurnChecked(tOk, fee, task_id, "task_estimate");
+    dispatchMode = externalNodes.length ? "paid" : "self";
+  } else {
+    dispatchMode = dispatchList.length ? (allSelf ? "self" : "self") : dispatchMode;
+  }
+  await doDispatch(dispatchList, task_id, payload, inbox, x => pushed.push(x), x => failed.push(x));
+  res.json({ ok: true, task_id, beacon_id: bid, mode: dispatchMode, pushed, queued, failed, promo_used: promoUsed });
 });
 
 app.get("/results/:task_id", (req, res) => {
@@ -833,7 +993,6 @@ app.post("/v1/chat/completions", async (req, res) => {
 
     // tier 收費：fast 用 node tier 較高（如 S/A）→ 貴；normal → 平。選 max tier 計費（保守）
     // free node：targets 全 free → 要求者唔 burn（善意分享）；mixed/付費 → 正常收
-    const reqAcc = reqTok ? accountForToken(reqTok) : null;
     let estFee = 0;
     let freeServed = false;
 
@@ -847,30 +1006,69 @@ app.post("/v1/chat/completions", async (req, res) => {
       candidates = [...registry.values()].filter(n => n.account); // fallback 平價
       console.log(`[v1] fallback all-candidates=${candidates.map(c=>c.node_id).join(",")}`);
     }
-    // 排序：score（含 rating/grade × share_ratio）為主，speed 只做 tiebreak
-    const sorted = matchCapabilities(mm.cap, candidates).sort((a,b) =>
+    // 排序：score（含 rating/grade × share_ratio ＋ 自己機優先加分）為主，speed 只做 tiebreak
+    const reqAcc = reqTok ? accountForToken(reqTok) : null;
+    const sorted = matchCapabilities(mm.cap, candidates, reqAcc).sort((a,b) =>
       b.score - a.score || (parseFloat(b.node.speed)||0) - (parseFloat(a.node.speed)||0));
     console.log(`[v1] sorted=${sorted.map(s=>s.node.node_id+":"+s.score.toFixed(2)).join(",")}`);
     // tool request 唔適合投票聚合（每個 node 會各自回唔同 tool call）→ 只派單一最佳 node
     const nTargets = useTool ? 1 : Math.max(1, mm.n_votes);
-    const targets = sorted.slice(0, nTargets).map(x => x.node);
+    let targets = sorted.slice(0, nTargets).map(x => x.node);
+    // 自己機優先：pref != fastest 且有自己機 → 只派自己機
+    const _pref = dispatchPrefFor(reqAcc);
+    if (reqAcc && _pref === "free-first") {
+      const fl = sorted.map(s => s.node).filter(t => t.account === reqAcc || t.free).slice(0, nTargets);
+      if (fl.length) targets = fl;
+    } else if (reqAcc && _pref !== "fastest") {
+      const own = sorted.map(s => s.node).filter(t => t.account === reqAcc).slice(0, nTargets);
+      if (own.length) targets = own;
+    }
     if (!targets.length) {
       return res.status(503).json({ error: { message: "no available worker" }, type: "server_error" });
     }
-    // 收費決定：任何 free node 參與（或有 freeOnly model）→ 免費（唔 burn）；全部付費 node → 正常估費 burn
+    // 收費決定：
+    //  - 全部自己機 → self（唔 burn）
+    //  - 有 free node 參與（或 freeOnly model）→ free（唔 burn）
+    //  - balance/quota 唔夠 → fallback 落自己機+free node；真冇先 402/429
+    let dispatchMode = "self";
+    const selfCandidates = targets.filter(t => reqAcc && t.account === reqAcc);
+    const allSelf = targets.length > 0 && selfCandidates.length === targets.length;
     freeServed = mm.freeOnly || targets.some(t => t.free);
     let promoUsed = null;
-    if (reqAcc && reqTok !== NET_TOKEN && !freeServed) {
-      const estIn = Math.round((prompt.length || 1000) / 3.5);
-      const estOut = max_tokens;
+    const estIn = Math.round((prompt.length || 1000) / 3.5);
+    const estOut = max_tokens;
+    if (reqAcc && reqTok !== NET_TOKEN && !freeServed && !allSelf) {
       estFee = tokensToCredit(estIn, estOut, tierCharge(topTier));
       const promoCode = promoFromReq(req);
       if (promoCode) { const r = applyPromoToFee(promoCode, estFee); estFee = r.fee; promoUsed = r.promo; }
       const bal = creditBalance(reqAcc);
-      if (bal < estFee) return res.status(402).json({ error: { message: `SWAI 餘額不足 (balance ${bal}, need ${estFee})` }, type: "insufficient_balance" });
-      const qRem = dailyQuotaRemaining(reqAcc);
-      if (estFee > qRem) return res.status(429).json({ error: { message: `今日 burn 上限已到（每日上限 ${DAILY_BURN_CAP} SWAI，今日剩 ${qRem}）`, type: "daily_quota_exceeded" }, error_type: "daily_quota_exceeded", daily_cap: DAILY_BURN_CAP, daily_remaining: qRem });
-      ledgerBurnChecked(reqAcc, estFee, null, "v1_chat_estimate");
+      const fallbackTargets = sorted.map(s => s.node).filter(t => t.free || (t.account === reqAcc)).slice(0, 1);
+      if (bal < estFee) {
+        if (fallbackTargets.length) {
+          dispatchMode = "fallback";
+          targets.length = 0; targets.push(...fallbackTargets);
+          estFee = 0;
+          console.log(`[v1] fallback-self ${targets.map(t=>t.node_id).join(",")}`);
+        } else {
+          return res.status(402).json({ error: { message: `SWAI 餘額不足 (balance ${bal}, need ${estFee})`, type: "insufficient_balance" } });
+        }
+      } else {
+        const qRem = dailyQuotaRemaining(reqAcc);
+        if (estFee > qRem) {
+          if (fallbackTargets.length) {
+            dispatchMode = "fallback";
+            targets.length = 0; targets.push(...fallbackTargets);
+            estFee = 0;
+          } else {
+            return res.status(429).json({ error: { message: `今日 burn 上限已到（每日上限 ${DAILY_BURN_CAP} SWAI，今日剩 ${qRem}）`, type: "daily_quota_exceeded" }, error_type: "daily_quota_exceeded", daily_cap: DAILY_BURN_CAP, daily_remaining: qRem });
+          }
+        } else {
+          ledgerBurnChecked(reqAcc, estFee, null, "v1_chat_estimate");
+          dispatchMode = allSelf ? "self" : "paid";
+        }
+      }
+    } else {
+      dispatchMode = allSelf ? "self" : (mm.freeOnly || freeServed ? "free" : "self");
     }
     const task_id = crypto.randomUUID();
     const beacon_id = crypto.randomUUID();
@@ -950,7 +1148,7 @@ app.post("/v1/chat/completions", async (req, res) => {
       id: task_id, object: "chat.completion", created: Math.floor(Date.now()/1000), model: modelKey,
       choices: [{ index: 0, message, finish_reason: toolCalls ? "tool_calls" : winner ? (finishReason || "stop") : "length" }],
       usage: { prompt_tokens: Math.round((prompt.length || 1000)/3.5), completion_tokens: tout, total_tokens: Math.round((prompt.length || 1000)/3.5) + tout },
-      swarmai: { nodes: p, votes: (rec?.list || []).map(r => r.node_id), confidence: Number(conf.toFixed(3)), est_fee: estFee, free_served: freeServed, promo_used: promoUsed, image_routed: hasImage },
+      swarmai: { nodes: p, votes: (rec?.list || []).map(r => r.node_id), confidence: Number(conf.toFixed(3)), est_fee: estFee, free_served: freeServed, promo_used: promoUsed, image_routed: hasImage, mode: dispatchMode, notice: dispatchMode === "fallback" ? "SWAI 唔夠 / quota 到頂 → 已自動落返自己機 + free machine（免費）" : undefined },
     };
     if (!stream) return res.json(bodyObj);
 
@@ -994,21 +1192,34 @@ app.post("/v1/images/generations", async (req, res) => {
     console.log(`[img] model=${model} units=${units} cand=${candidates.map(c=>c.node_id).join(",")}`);
     // free node 只係可選 bonus；唔做 freeOnly——image 要收費（成本唔細）
     if (!candidates.length) return res.status(503).json({ error: { message: "no image worker available（未有 image-gen node）", type: "server_error" } });
-    const sorted = matchCapabilities(mm.cap, candidates).sort((a,b) => b.score - a.score);
-    const target = sorted[0].node;
+    const sorted = matchCapabilities(mm.cap, candidates, reqAcc).sort((a,b) => b.score - a.score);
+    let target = sorted[0].node;
     let estFee = 0, promoUsed = null;
-    if (reqAcc && reqTok !== NET_TOKEN && !target.free) {
+    let dispatchMode = "paid";
+    if (reqAcc && reqTok !== NET_TOKEN && !(target.account === reqAcc) && !target.free) {
       estFee = fee;
       const promoCode = promoFromReq(req);
       if (promoCode) { const r2 = applyPromoToFee(promoCode, estFee); estFee = r2.fee; promoUsed = r2.promo; }
       const bal = creditBalance(reqAcc);
-      if (bal < estFee) return res.status(402).json({ error: { message: `SWAI 餘額不足 (balance ${bal}, need ${estFee})` }, type: "insufficient_balance" });
-      const qRem = dailyQuotaRemaining(reqAcc);
-      if (estFee > qRem) return res.status(429).json({ error: { message: `今日 burn 上限已到（每日上限 ${DAILY_BURN_CAP} SWAI，今日剩 ${qRem}）`, type: "daily_quota_exceeded" }, daily_cap: DAILY_BURN_CAP, daily_remaining: qRem });
-      ledgerBurnChecked(reqAcc, estFee, "img_" + Date.now(), "image_estimate");
-      freeServed = false;
-    } else if (target.free) { freeServed = true; }
+      const hasSelfGen = sorted.some(x => x.node.account === reqAcc || x.node.free);
+      if (bal < estFee) {
+        if (hasSelfGen) {  // 自己 image-gen or free → fallback 免費
+          const fb = sorted.find(x => x.node.account === reqAcc || x.node.free);
+          estFee = 0; dispatchMode = "fallback";
+          sorted.length = 0; sorted.push({ node: fb.node, score: 1 });
+        } else {
+          return res.status(402).json({ error: { message: `SWAI 餘額不足 (balance ${bal}, need ${estFee})` }, type: "insufficient_balance" });
+        }
+      } else {
+        const qRem = dailyQuotaRemaining(reqAcc);
+        if (estFee > qRem) {
+          if (hasSelfGen) { const fb = sorted.find(x => x.node.account === reqAcc || x.node.free); estFee = 0; dispatchMode = "fallback"; sorted.length = 0; sorted.push({ node: fb.node, score: 1 }); }
+          else return res.status(429).json({ error: { message: `今日 burn 上限已到（每日上限 ${DAILY_BURN_CAP} SWAI，今日剩 ${qRem}）`, type: "daily_quota_exceeded" }, daily_cap: DAILY_BURN_CAP, daily_remaining: qRem });
+        } else { ledgerBurnChecked(reqAcc, estFee, "img_" + Date.now(), "image_estimate"); dispatchMode = target.account === reqAcc ? "self" : "paid"; }
+      }
+    } else if (target.account === reqAcc) { dispatchMode = "self"; }
     const task_id = crypto.randomUUID();
+    target = sorted[0].node;   // 可能係 fallback 後嘅 node
     const payload = {
       task_id, "adapter": "image", prompt, n: units, size,
       image_data: undefined, max_tokens: 0,
@@ -1041,7 +1252,7 @@ app.post("/v1/images/generations", async (req, res) => {
     res.json({
       created: Math.floor(Date.now()/1000), data: images, model,
       usage: { image_count: images.length },
-      swarmai: { nodes: (rec.list || []).map(r => r.node_id), est_fee: estFee, free_served: freeServed, promo_used: promoUsed },
+      swarmai: { nodes: (rec.list || []).map(r => r.node_id), est_fee: estFee, free_served: freeServed, promo_used: promoUsed, mode: dispatchMode, notice: dispatchMode === "fallback" ? "SWAI 唔夠 / quota 到頂 → 已自動落返自己機 + free machine（免費）" : undefined },
     });
   } catch (e) {
     res.status(500).json({ error: { message: String(e.message || e).slice(0, 200) }, type: "server_error" });
@@ -1080,6 +1291,7 @@ app.post("/portal/signup", (req, res) => {
   db.prepare("INSERT INTO user_keys(email, token, label, created, scope) VALUES(?,?,?,?,?)")
     .run(e, token, "primary", Date.now(), "full");
   claimNode(node_id, e);
+  ensureDepositAddr(e);
   // Pilot 開戶送分（試玩額）
   if (SIGNUP_BONUS > 0) {
     ledgerMint(e, { tokensIn: 0, tokensOut: SIGNUP_BONUS * RATE_OUT, taskId: null, note: "welcome_bonus", nodeId: node_id, kind: "manual" });
@@ -1106,7 +1318,10 @@ app.get("/portal/me", (req, res) => {
       tier: nodeTier(n), ctx: n.max_context || 0, model: n.model || "", gpu: n.gpu || "", free: !!n.free,
       abilities: n.abilities || null,
       rating: computeRating(n),
+      online: nodeOnline(n),
+      last_seen_min: nodeLastSeenMin(n),
       settings: {
+        free: !!st.free,
         sleep_start_hour: st.sleep_start_hour ?? null,
         sleep_end_hour: st.sleep_end_hour ?? null,
         share_ratio: st.share_ratio ?? null,
@@ -1115,14 +1330,19 @@ app.get("/portal/me", (req, res) => {
       },
     };
   });
-  const prof = db.prepare("SELECT display_name, pref_model, timezone, sleep_start_hour, sleep_end_hour, share_default, max_budget_per_task FROM users WHERE email=?").get(u.email) || {};
+  const prof = db.prepare("SELECT display_name, pref_model, timezone, sleep_start_hour, sleep_end_hour, share_default, max_budget_per_task, dispatch_pref FROM users WHERE email=?").get(u.email) || {};
+  const myOnline = nodes.filter(n => n.online && !n.settings.removed).length;
+  const bal = creditBalance(u.email);
+  const dispatchMode = bal <= 0 ? (myOnline ? "fallback" : "empty") : (myOnline ? "self" : "paid");
   res.json({
-    ok: true, email: u.email, node_id: u.node_id, account: u.email, balance: creditBalance(u.email),
+    ok: true, email: u.email, node_id: u.node_id, account: u.email, balance: bal,
+    dispatch: { pref: prof.dispatch_pref || "self", mode: dispatchMode, notice: dispatchMode === "fallback" ? "SWAI 有限 → 而家自動用緊你自己機（唔扣 token；想用出面機就去充值）" : (dispatchMode === "empty" ? "SWAI 用完，自己機又冇上線 → 請充值或起返自己 worker" : (myOnline ? "自己機優先（免費）；可用出面機時先至扣 SWAI" : "出面機主導（按 rating 揀）——想優先自己機？起返自己 worker 即刻免費")) },
     profile: prof,
     keys: listKeysByToken(t).map(k => ({ token: k.token, label: k.label, scope: k.scope || "full", last_used_at: k.last_used_at, last_ip: k.last_ip })),
     daily: { cap: DAILY_BURN_CAP, used: dailyUsed(u.email), remaining: dailyQuotaRemaining(u.email) },
+    topup: { min_usdc: MIN_USDC_TOPUP, rate: USDC_TO_SWAI, deposit_addr: (db.prepare("SELECT usdc_deposit_addr FROM users WHERE email=?").get(u.email) || {}).usdc_deposit_addr || null },
     nodes,
-    economy_note: "計法：idle 1 分鐘 mint = (tok/s × 60 × share_ratio%) / 1000 SWAI；投票按實際 in/out tokens（in 5000t/SWAI、out 1000t/SWAI）。share_ratio=100 全產能；越低越少誘獎、派工優先度越低（防蜂擁）。",
+    economy_note: "計法：idle 1 分鐘 mint = (tok/s × 60 × share_ratio%) / 1000 SWAI；投票按實際 in/out tokens（in 5000t/SWAI、out 1000t/SWAI）。share_ratio=100 全產能；越低越少誘獎、派工優先度越低（防蜂擁）。充值：1 USDC = " + USDC_TO_SWAI + " SWAI。",
     journal: led
   });
 });
@@ -1140,6 +1360,7 @@ app.post("/portal/update_profile", (req, res) => {
   if (b.sleep_end_hour !== undefined) fields.sleep_end_hour = Math.max(0, Math.min(23, Number(b.sleep_end_hour) || 7));
   if (b.share_default !== undefined) fields.share_default = Math.max(0, Math.min(100, Number(b.share_default) || 100));
   if (b.max_budget_per_task !== undefined) fields.max_budget_per_task = Math.max(0, Number(b.max_budget_per_task) || 0);
+  if (b.dispatch_pref !== undefined && ["self", "fastest", "free-first"].includes(b.dispatch_pref)) fields.dispatch_pref = b.dispatch_pref;
   if (!Object.keys(fields).length) return res.status(400).json({ ok: false, error: "no fields" });
   const sets = Object.keys(fields).map(k => `${k}=?`).join(",");
   db.prepare(`UPDATE users SET ${sets} WHERE email=?`).run(...Object.values(fields), u.email);
@@ -1178,6 +1399,7 @@ app.post("/portal/node_settings", (req, res) => {
   if (b.sleep_end_hour !== undefined && b.sleep_end_hour !== null && b.sleep_end_hour !== "") { cols.push("sleep_end_hour"); vals.push(Math.max(0, Math.min(23, Number(b.sleep_end_hour) || 0))); }
   if (b.share_ratio !== undefined && b.share_ratio !== null && b.share_ratio !== "") { cols.push("share_ratio"); vals.push(Math.max(0, Math.min(100, Number(b.share_ratio) || 0))); }
   if (b.suspend !== undefined) { cols.push("suspend"); vals.push(b.suspend ? 1 : 0); }
+  if (b.free !== undefined) { cols.push("free"); vals.push(b.free ? 1 : 0); }
   if (!cols.length) return res.status(400).json({ ok: false, error: "no fields" });
   db.prepare(`INSERT OR IGNORE INTO node_settings(node_id,email,updated) VALUES(?,?,?)`).run(String(node_id), u.email, Date.now());
   const sets = cols.map(c => `${c}=?`).join(",");
@@ -1185,6 +1407,7 @@ app.post("/portal/node_settings", (req, res) => {
   const out = { node_id };
   cols.forEach((c, i) => out[c] = vals[i]);
   if (b.share_ratio !== undefined && b.share_ratio !== null && b.share_ratio !== "") n.share_ratio = Number(b.share_ratio);
+  if (b.free !== undefined) { n.free = !!b.free; n.free_manual = true; }
   res.json({ ok: true, settings: out });
 });
 
