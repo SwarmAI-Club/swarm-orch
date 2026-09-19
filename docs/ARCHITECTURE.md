@@ -16,33 +16,42 @@
 
 ---
 
-## 1. 實體基建（实测 2026-09-18）
+## 1. 實體基建（实测 2026-09-19）
 
 ```
-[ main ] 100.70.76.100  (2x2080Ti 22GB, WSL2)
+[ main ] 100.70.76.100  (2x2080Ti 22GB, WSL2)  ← 私人主機，唔 share
  ├─ Router  :4900       (中央調度+分帳; bind 127.0.0.1 + 100.70.76.100)
- ├─ Worker ×5 :5900-5904 (agent 代理, 全喺 main 行)
- ├─ qwythos :8087        ctx 65536 ×2 slots  --reasoning off
- └─ qwen-vl :8090        ctx 32768 (vision, 4 slots)
+ ├─ main worker → SUSPEND 佢（唔派工，mainpc 自用）
+ ├─ qwen-vision → SUSPEND（唔 share；vision 由 rtx2080ti-vl 提供）
+ └─ 你日常 AI 入口（portal/api/self-learning）
 
-[ rtx2080ti ]  100.106.211.51  (22GB)   qwythos :8087  ctx 65536    + qwen-vl :8089
-[ rtx3060   ]  100.97.2.13     (12GB)   qwythos :8080  ctx 65536
-[ rtx2060a  ]  100.97.18.72    (12GB)   qwythos :8087  ctx 65536    (經 Windows wsl)
-[ rtx2060b  ]  100.89.139.66   (12GB)   qwythos :8087  ctx 65536    (經 Windows wsl)
-[ contabo   ]  100.99.14.67 / 2.58.82.219   emerge :8085  ctx 2048   (CPU, 唔入主網)
+共享 node（4 部閒置機入網，vision-only-free）：
+[ rtx2080ti ]  100.106.211.51  (22GB)   qwythos :8087 (非free) + qwen-vl :8089 (free, vision primary)
+[ rtx2080ti-vl ] 100.106.211.51 :8089   Qwen2.5-VL 7B (free, capabilities=vision)
+[ rtx3060   ]  100.97.2.13     (12GB)   qwythos :8080 (非free，唔serve vision)
+[ rtx2060a  ]  100.97.18.72    (12GB)   qwythos :8087 (free + vision backup)
+[ rtx2060b  ]  100.89.139.66   (12GB)   qwythos :8087 (free + vision backup)
 ```
+
+### Vision-only-Free Policy（2026-09-19）
+- **只有 free node 先 serve vision**：`rtx2080ti-vl`（Qwen-VL primary）+ `rtx2060a/b`（Qwythos mmproj backup）都係 free。
+- `rtx3060` / `rtx2080ti`（非 free）**唔加 `vision` capability** → router 唔會派 vision 任務俾佢哋（`matchCapabilities` 見冇 cap → 唔揀）。
+- 效果：任何用家 vision 任務都派去免費 nodes（唔扣 token，吸引試用）；text 照 economic 規則（free 活着 paid）。
+- **Backup 鏈**：`rtx2080ti-vl`（高質 Qwen-VL）primary → 若冧，自動落 `rtx2060a/b`（Qwythos 帶 mmproj）。
 
 ### 啟動 scripts（權威，重啟唔失憶）
 | Node | 啟動 | watchdog |
 |---|---|---|
 | main :8087 | `agent-core/llama-launch/main-8087.sh`（`-c 131072 --parallel 2 --reasoning off`）| cron `ensure-llama-8087.sh` 5min |
 | rtx2080ti | `ssh ubuntu@100.106.211.51 ~/llama-8087.sh` | — |
+| rtx2080ti-vl | `ssh ubuntu@100.106.211.51` 起 `/opt/models/qwen-vl/` `:8089`（`-c 8192 -ngl 99`）| worker 加 `rtx2080ti-vl`（free, vision）|
 | rtx3060 | `ssh ubuntu@100.97.2.13 ~/llama-8080.sh` | `run-qwythos.sh` |
 | rtx2060a | wsl `/opencode/llama-8087.sh` | — |
 | rtx2060b | wsl `/opencode/llama-8087.sh` | — |
 
 > ⚠️ main 一定要 `-c 131072 --parallel 2`（`--parallel N` 會分 ctx；`65536,2` = 32768×2）。
 > ⚠️ 2060a/b 冇直接 WSL SSH → 經 `sshpass marco@100.115.169.51/100.103.0.102` + `wsl -d Ubuntu -u root -- sh -c`（多命令用 base64，防 cmd.exe 拆引號）。
+> ⚠️ **Worker 起法 `agent-core/swarm-workers-start.sh`**：main + qwen-vision 兩行**保留但 SUSPEND**（`/portal/node_settings` suspend:true → router 唔派）；`rtx2080ti-vl` 加咗行（free vision）；2060a/b caps 有 `vision`；3060/2080ti cap 冇。
 
 ## 2. 角色 / 端口
 
@@ -170,6 +179,18 @@ mint mult = 0.75 + rating/100×0.5；派工 sort 乘 rating
 - **離線偵測**：`nodeOnline()`（>5min 冇心跳 = offline）；`matchCapabilities` filter offline；`/portal/me` nodes 帶 `online` + `last_seen_min`。唔 auto-purge（portal 手動移除）。
 - **USDC on Polygon 充值**：`deposits` 表；`/portal/topup` 顯示收款地址（`SWARM_DEPOSIT_WALLET`）+ 兌換率（`SWAI_USDC_RATE` default 100）；`/portal/topup/submit` 提交 tx → `scanPolygonTx`（`eth_getTransactionReceipt` 掃 USDC `Transfer` event，`POLYGON_USDC` contract）→ confirmations ≥1 且 amount≥`MIN_USDC_TOPUP`(5) → `ledgerMint` kind=`deposit`。MVP 用 public RPC（`POLYGON_RPC`）。
 
+## 10e. Vision-Only-Free + rtx2080ti-vl（2026-09-19）
+- **主機私有**：main (`main` + `qwen-vision` workers) → **SUSPEND**（唔派工、唔 share、一鍵可還原）。mainpc 只做 Router + 私人服務。
+- **vision 免費通道**：只有 free node 有 `vision` capability → router 只派 vision 去: `rtx2080ti-vl`(Qwen-VL :8089, primary) + `rtx2060a/b`(Qwythos mmproj, backup)。非 free node（rtx3060/rtx2080ti）冇 vision cap → 唔 serve。
+- `rtx2080ti-vl` worker：cap `vision`、free:true、port 5906、main 起，`agent-core/swarm-workers-start.sh` NODES 有。
+- ⚠️ Vision 若 2080ti 冧 → 自動落 2060a/b（一般質素）；若成個機網冇 vision node → 503（牌）。
+
+## 10f. 集體智能 Learn-Study（2026-09-19）
+- 實驗證明「數量取勝」：`benchmarks/run_quantity.py` — 12 條 BBH+AMC 標準題 × 5 strategies（direct / majority / self-consistency / divergent / verifier）。
+- **結果**：majority(11/12) = self-consistency(11/12) > direct(10/12) > verifier(8/12) > divergent(7/12)。
+- **結論**：learn-agent 難題用 **self-consistency**（同機抖 temp 3 次攞 majority）最經濟提升準確率；唔建議 divergent（強迫方法反跌）／same-node verifier（驗證唔夠客觀）。
+- 詳見 `docs/QUANTITY_LEARN_STUDY.md`。
+
 ## 10c. 用戶私隱（2026-09-19 起明列保證）
 - **Data minimization（默認唔留）**：任務 prompt / AI 輸出結果**唔寫落任何 DB**（`ledger.db` 只有 users/credits/ledger/node_settings/daily_usage 等營運數據，冇任務內容表）。Router 處理過程用 in-memory `resultsStore`，結算完成後自動清（10min sweep），router restart 即全部消失。
 - **Log 淨係營運 metadata**：router log 只記錄 node_id / model / units / 派工結果，**唔含 prompt / 答案內容**（2026-09-19 審查 + 移除 `[img]` prompt head 洩漏）。worker log 唔含 prompt。
@@ -177,5 +198,5 @@ mint mult = 0.75 + rating/100×0.5；派工 sort 乘 rating
 - **帳戶級數據**：email（登入用）+ SWAI 餘額 + node 設定，只喺你自己 account 內可見（/portal/me 用你 token 認返你自己）。password 用 scrypt hash，冇明文。
 - **承諾邊界**：記數（tokens/units/credit）係營運必需，保留；**任務內容係 ephemeral，平台唔保存、唔分析、唔分享**。社群版可喺 bot `/privacy` 顯示呢份保證。
 - **Worker 側原則**：specialty worker 同 router 一律用 `/assign`+`/result`（HMAC 簽名 + assigned-set 防偽）對接，被 adapter 只係「completion 換成圖/視訊 API」。sandbox Dockerfile 加 `--gpus` + 額外依賴即可。
-- **Vision（現有）**：`qwen-vision` 係平台自家 node（rtx2080ti :8089），`swarmai-vision` 自動分流；唔要求一般用戶裝 VL model。若全網冇 vision node 上線，image 請求先會 503 —— 靠平台 keep ≥1 隻 VL 兜底。
+- **Vision（2026-09-19 更新）**：`qwen-vision`（main :8090）已 SUSPEND（main 私有）；vision 由 `rtx2080ti-vl`（Qwen2.5-VL :8089, free）提供 + 2060a/b（Qwythos mmproj）backup，全部 free。see §10e.
 - **節點設定分層（2026-09-19 起）**：user-level（`users` 表）：display_name / pref_model / timezone / sleep 窗口 / share_default / max_budget_per_task；**node-level（`node_settings` 表）**：free / sleep_start_hour / sleep_end_hour / share_ratio / suspend / removed —— node 有設就覆寫 user 預設（`nodeShareOverride` / `nodeSuspended` / `nodeRemoved`），portal `/portal/node_settings` 逐 node 設定。

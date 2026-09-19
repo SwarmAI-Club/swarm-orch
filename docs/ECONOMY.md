@@ -126,3 +126,10 @@
 - `swarmai-image`（image-gen）：20 SWAI/job（`SWAI_IMAGE_UNIT_PRICE`），max 4 units
 - `swarmai-video`（video-gen）：80 SWAI/job（`SWAI_VIDEO_UNIT_PRICE`），max 8 units
 - 計費行 `units × unitPrice`，ledger `units` 欄；同一 system 支援自己機優先 + fallback
+
+## 13. Vision-Only-Free 派工規則（2026-09-19）
+- **只有 free node 先 serve vision**：`rtx2080ti-vl`（Qwen-VL primary, free）+ `rtx2060a/b`（Qwythos mmproj backup, free）有 `vision` capability。
+- **非 free node**（`rtx3060`/`rtx2080ti`）冇 `vision` cap → `matchCapabilities(["vision"])` 揀唔到 → 唔 serve（刻意）。
+- 效果：任何 user 嘅 vision 任務 → 免費（free_served=true, mode=free）；唔扣 token → 吸引試玩。
+- **主機私有**：main (`main`/`qwen-vision`) 已 SUSPEND → 唔派工、唔 share；mainpc 只做 Router + 私人使用。
+- `swarmai-vision` model 自動分流唔變；image request 揀 vision cap 嘅 free nodes。
