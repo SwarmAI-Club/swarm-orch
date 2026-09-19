@@ -179,6 +179,12 @@ mint mult = 0.75 + rating/100×0.5；派工 sort 乘 rating
 - **離線偵測**：`nodeOnline()`（>5min 冇心跳 = offline）；`matchCapabilities` filter offline；`/portal/me` nodes 帶 `online` + `last_seen_min`。唔 auto-purge（portal 手動移除）。
 - **USDC on Polygon 充值**：`deposits` 表；`/portal/topup` 顯示收款地址（`SWARM_DEPOSIT_WALLET`）+ 兌換率（`SWAI_USDC_RATE` default 100）；`/portal/topup/submit` 提交 tx → `scanPolygonTx`（`eth_getTransactionReceipt` 掃 USDC `Transfer` event，`POLYGON_USDC` contract）→ confirmations ≥1 且 amount≥`MIN_USDC_TOPUP`(5) → `ledgerMint` kind=`deposit`。MVP 用 public RPC（`POLYGON_RPC`）。
 
+## 10g. 安全模型（2026-09-19 pre-pilot audit）
+- **SSRF 修復（重要）**：router 只會 `push`（主動 fetch）去**本機 BIND hosts**（`nodePushAddrOK`: host ∈ [127.0.0.1, 100.70.76.100]）；其他 url 一律 `--pull` inbox queue（worker 自己 poll）。**外部 user 註冊 node 一律強制 `pull=true`**（唔可以令 router 代打內網/其他節點）。`/beacon` 同有咁樣 filter。
+- **認證**：所有非 `/portal` endpoint 要 `X-Swarm-Token`（冇 token → 401；fake token → 401）。`/ledger/mint|burn`、`/admin/*` 只接受 NET_TOKEN（普通 user → 403）。
+- **防偽**：`/assign` HMAC 簽名（`SWARM_ROUTER_SECRET`）、`/result` verified assigned-set、`/tasks/poll` 鎖 node 歸屬。
+- **pre-pilot scan 結果（2026-09-19）**：未認證/fake-token/USER撞admin 全部 401/403 ✅；SSRF 外部 node force pull ✅；install flow self-test 8/8 PASS ✅。
+
 ## 10e. Vision-Only-Free + rtx2080ti-vl（2026-09-19）
 - **主機私有**：main (`main` + `qwen-vision` workers) → **SUSPEND**（唔派工、唔 share、一鍵可還原）。mainpc 只做 Router + 私人服務。
 - **vision 免費通道**：只有 free node 有 `vision` capability → router 只派 vision 去: `rtx2080ti-vl`(Qwen-VL :8089, primary) + `rtx2060a/b`(Qwythos mmproj, backup)。非 free node（rtx3060/rtx2080ti）冇 vision cap → 唔 serve。
