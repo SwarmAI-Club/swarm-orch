@@ -1,0 +1,452 @@
+{
+  "ts": 1789800334,
+  "samples": 1,
+  "strategies": {
+    "A_direct": {
+      "correct": 0,
+      "answers": [
+        {
+          "q": 0,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 1,
+          "result": null,
+          "correct": "C",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 2,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 3,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 4,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 5,
+          "result": null,
+          "correct": "A",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 6,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 7,
+          "result": null,
+          "correct": "A",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 8,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 9,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 10,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 11,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        }
+      ]
+    },
+    "B_majority": {
+      "correct": 0,
+      "answers": [
+        {
+          "q": 0,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 1,
+          "result": null,
+          "correct": "C",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 2,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 3,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 4,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 5,
+          "result": null,
+          "correct": "A",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 6,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 7,
+          "result": null,
+          "correct": "A",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 8,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 9,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 10,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 11,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        }
+      ]
+    },
+    "C_selfconsistency": {
+      "correct": 0,
+      "answers": [
+        {
+          "q": 0,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 1,
+          "result": null,
+          "correct": "C",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 2,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 3,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 4,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 5,
+          "result": null,
+          "correct": "A",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 6,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 7,
+          "result": null,
+          "correct": "A",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 8,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 9,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 10,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 11,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        }
+      ]
+    },
+    "D_divergent": {
+      "correct": 0,
+      "answers": [
+        {
+          "q": 0,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 1,
+          "result": null,
+          "correct": "C",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 2,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 3,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 4,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 5,
+          "result": null,
+          "correct": "A",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 6,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 7,
+          "result": null,
+          "correct": "A",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 8,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 9,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 10,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 11,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        }
+      ]
+    },
+    "E_verifier": {
+      "correct": 0,
+      "answers": [
+        {
+          "q": 0,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 1,
+          "result": null,
+          "correct": "C",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 2,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 3,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 4,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 5,
+          "result": null,
+          "correct": "A",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 6,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 7,
+          "result": null,
+          "correct": "A",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 8,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 9,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 10,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        },
+        {
+          "q": 11,
+          "result": null,
+          "correct": "B",
+          "ok": false,
+          "raw": []
+        }
+      ]
+    }
+  },
+  "questions": 12
+}

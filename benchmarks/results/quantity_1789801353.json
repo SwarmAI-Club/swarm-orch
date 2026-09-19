@@ -1,0 +1,656 @@
+{
+  "ts": 1789801353,
+  "samples": 3,
+  "strategies": {
+    "A_direct": {
+      "correct": 10,
+      "answers": [
+        {
+          "q": 0,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B"
+          ]
+        },
+        {
+          "q": 1,
+          "result": "C",
+          "correct": "C",
+          "ok": true,
+          "raw": [
+            "C"
+          ]
+        },
+        {
+          "q": 2,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B"
+          ]
+        },
+        {
+          "q": 3,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B"
+          ]
+        },
+        {
+          "q": 4,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B"
+          ]
+        },
+        {
+          "q": 5,
+          "result": "C",
+          "correct": "A",
+          "ok": false,
+          "raw": [
+            "C"
+          ]
+        },
+        {
+          "q": 6,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B"
+          ]
+        },
+        {
+          "q": 7,
+          "result": "A",
+          "correct": "A",
+          "ok": true,
+          "raw": [
+            "A"
+          ]
+        },
+        {
+          "q": 8,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B"
+          ]
+        },
+        {
+          "q": 9,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B"
+          ]
+        },
+        {
+          "q": 10,
+          "result": "C",
+          "correct": "B",
+          "ok": false,
+          "raw": [
+            "C"
+          ]
+        },
+        {
+          "q": 11,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B"
+          ]
+        }
+      ]
+    },
+    "B_majority": {
+      "correct": 11,
+      "answers": [
+        {
+          "q": 0,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B",
+            "B",
+            "B"
+          ]
+        },
+        {
+          "q": 1,
+          "result": "C",
+          "correct": "C",
+          "ok": true,
+          "raw": [
+            "C",
+            "C",
+            "C"
+          ]
+        },
+        {
+          "q": 2,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B",
+            "B",
+            "B"
+          ]
+        },
+        {
+          "q": 3,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B",
+            "B",
+            "B"
+          ]
+        },
+        {
+          "q": 4,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B",
+            "B",
+            "B"
+          ]
+        },
+        {
+          "q": 5,
+          "result": "C",
+          "correct": "A",
+          "ok": false,
+          "raw": [
+            "C",
+            "C",
+            "C"
+          ]
+        },
+        {
+          "q": 6,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B",
+            "B",
+            "B"
+          ]
+        },
+        {
+          "q": 7,
+          "result": "A",
+          "correct": "A",
+          "ok": true,
+          "raw": [
+            "A",
+            "A",
+            "A"
+          ]
+        },
+        {
+          "q": 8,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B",
+            "B",
+            "B"
+          ]
+        },
+        {
+          "q": 9,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B",
+            "B",
+            "B"
+          ]
+        },
+        {
+          "q": 10,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B",
+            "B",
+            "A"
+          ]
+        },
+        {
+          "q": 11,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B",
+            "B",
+            "B"
+          ]
+        }
+      ]
+    },
+    "C_selfconsistency": {
+      "correct": 11,
+      "answers": [
+        {
+          "q": 0,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B",
+            "B",
+            "B"
+          ]
+        },
+        {
+          "q": 1,
+          "result": "C",
+          "correct": "C",
+          "ok": true,
+          "raw": [
+            "C",
+            "C",
+            "C"
+          ]
+        },
+        {
+          "q": 2,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B",
+            "B",
+            "B"
+          ]
+        },
+        {
+          "q": 3,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B",
+            "B",
+            "D"
+          ]
+        },
+        {
+          "q": 4,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B",
+            "B",
+            "B"
+          ]
+        },
+        {
+          "q": 5,
+          "result": "C",
+          "correct": "A",
+          "ok": false,
+          "raw": [
+            "C",
+            "C",
+            "C"
+          ]
+        },
+        {
+          "q": 6,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B",
+            "B",
+            "B"
+          ]
+        },
+        {
+          "q": 7,
+          "result": "A",
+          "correct": "A",
+          "ok": true,
+          "raw": [
+            "A",
+            "A",
+            "A"
+          ]
+        },
+        {
+          "q": 8,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B",
+            "B",
+            "C"
+          ]
+        },
+        {
+          "q": 9,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B",
+            "B",
+            "B"
+          ]
+        },
+        {
+          "q": 10,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B",
+            "B",
+            "B"
+          ]
+        },
+        {
+          "q": 11,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B",
+            "B",
+            "B"
+          ]
+        }
+      ]
+    },
+    "D_divergent": {
+      "correct": 7,
+      "answers": [
+        {
+          "q": 0,
+          "result": "A",
+          "correct": "B",
+          "ok": false,
+          "raw": [
+            "A",
+            "A",
+            "A"
+          ]
+        },
+        {
+          "q": 1,
+          "result": "C",
+          "correct": "C",
+          "ok": true,
+          "raw": [
+            "C",
+            "C",
+            "C"
+          ]
+        },
+        {
+          "q": 2,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B",
+            "B",
+            "B"
+          ]
+        },
+        {
+          "q": 3,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B",
+            "B",
+            "B"
+          ]
+        },
+        {
+          "q": 4,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B",
+            "B",
+            "B"
+          ]
+        },
+        {
+          "q": 5,
+          "result": "C",
+          "correct": "A",
+          "ok": false,
+          "raw": [
+            "C",
+            "C",
+            "C"
+          ]
+        },
+        {
+          "q": 6,
+          "result": "A",
+          "correct": "B",
+          "ok": false,
+          "raw": [
+            "A",
+            "B",
+            "A"
+          ]
+        },
+        {
+          "q": 7,
+          "result": "A",
+          "correct": "A",
+          "ok": true,
+          "raw": [
+            "A",
+            "A",
+            "C"
+          ]
+        },
+        {
+          "q": 8,
+          "result": "C",
+          "correct": "B",
+          "ok": false,
+          "raw": [
+            "C",
+            "C",
+            "C"
+          ]
+        },
+        {
+          "q": 9,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B",
+            "B",
+            "B"
+          ]
+        },
+        {
+          "q": 10,
+          "result": "C",
+          "correct": "B",
+          "ok": false,
+          "raw": [
+            "C",
+            "B",
+            "C"
+          ]
+        },
+        {
+          "q": 11,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B",
+            "B",
+            "B"
+          ]
+        }
+      ]
+    },
+    "E_verifier": {
+      "correct": 8,
+      "answers": [
+        {
+          "q": 0,
+          "result": "A",
+          "correct": "B",
+          "ok": false,
+          "raw": [
+            "B",
+            "A"
+          ]
+        },
+        {
+          "q": 1,
+          "result": "C",
+          "correct": "C",
+          "ok": true,
+          "raw": [
+            "C",
+            "C"
+          ]
+        },
+        {
+          "q": 2,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B",
+            "B"
+          ]
+        },
+        {
+          "q": 3,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B",
+            "B"
+          ]
+        },
+        {
+          "q": 4,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B",
+            "B"
+          ]
+        },
+        {
+          "q": 5,
+          "result": "C",
+          "correct": "A",
+          "ok": false,
+          "raw": [
+            "C",
+            "C"
+          ]
+        },
+        {
+          "q": 6,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B",
+            "A"
+          ]
+        },
+        {
+          "q": 7,
+          "result": "B",
+          "correct": "A",
+          "ok": false,
+          "raw": [
+            "A",
+            "B"
+          ]
+        },
+        {
+          "q": 8,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B",
+            "B"
+          ]
+        },
+        {
+          "q": 9,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B",
+            "B"
+          ]
+        },
+        {
+          "q": 10,
+          "result": "A",
+          "correct": "B",
+          "ok": false,
+          "raw": [
+            "A",
+            "C"
+          ]
+        },
+        {
+          "q": 11,
+          "result": "B",
+          "correct": "B",
+          "ok": true,
+          "raw": [
+            "B",
+            "B"
+          ]
+        }
+      ]
+    }
+  },
+  "questions": 12
+}

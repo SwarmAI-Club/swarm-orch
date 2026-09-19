@@ -1,0 +1,20 @@
+<!DOCTYPE html><html lang="zh-Hant"><head><meta charset="utf-8">
+<title>SwarmAI Quantity Learn-Study Report</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>body{font-family:-apple-system,sans-serif;background:#0b1220;color:#cbd5e1;padding:24px}
+h1{font-size:1.4rem} h2{font-size:1.1rem;color:#22d3ee} table{border-collapse:collapse;font-size:.85rem}
+td,th{border:1px solid #1f2937;padding:6px 10px} .ok{color:#4ade80} .no{color:#f87171}
+.chartbox{max-width:900px;margin:20px 0}</style></head><body>
+<h1>&#x1F41D; SwarmAI Quantity Learn-Study &#8212; &#x300C;&#x6578;&#x91CF;&#x53D6;&#x52DD;&#x300D;&#x7B56;&#x7565;&#x5C0D;&#x6BD4;</h1>
+<p>3 samples per strategy &#183; 2026-09-19 15:10</p>
+<div class="chartbox"><canvas id="acc"></canvas></div>
+<h2>Accuracy (&#x6E96;&#x78BA;&#x7387; %)</h2>
+<table><tr><th>Strategy</th><th>Accuracy</th></tr><tr><td>A_direct</td><td class="ok">83.33333333333334%</td></tr><tr><td>B_majority</td><td class="ok">91.66666666666666%</td></tr><tr><td>C_selfconsistency</td><td class="ok">91.66666666666666%</td></tr><tr><td>D_divergent</td><td class="ok">58.333333333333336%</td></tr><tr><td>E_verifier</td><td class="ok">66.66666666666666%</td></tr></table>
+<div class="chartbox"><canvas id="perq"></canvas></div>
+<h2>Per-question correct</h2>
+<table><tr><th>Q</th><th>Q0</th><th>Q1</th><th>Q2</th><th>Q3</th><th>Q4</th><th>Q5</th><th>Q6</th><th>Q7</th><th>Q8</th><th>Q9</th><th>Q10</th><th>Q11</th><th>Acc</th></tr><tr><td><b>A_direct</b></td><td class='ok'>✓</td><td class='ok'>✓</td><td class='ok'>✓</td><td class='ok'>✓</td><td class='ok'>✓</td><td class='no'>✗</td><td class='ok'>✓</td><td class='ok'>✓</td><td class='ok'>✓</td><td class='ok'>✓</td><td class='no'>✗</td><td class='ok'>✓</td><td>83.33333333333334%</td></tr><tr><td><b>B_majority</b></td><td class='ok'>✓</td><td class='ok'>✓</td><td class='ok'>✓</td><td class='ok'>✓</td><td class='ok'>✓</td><td class='no'>✗</td><td class='ok'>✓</td><td class='ok'>✓</td><td class='ok'>✓</td><td class='ok'>✓</td><td class='ok'>✓</td><td class='ok'>✓</td><td>91.66666666666666%</td></tr><tr><td><b>C_selfconsistency</b></td><td class='ok'>✓</td><td class='ok'>✓</td><td class='ok'>✓</td><td class='ok'>✓</td><td class='ok'>✓</td><td class='no'>✗</td><td class='ok'>✓</td><td class='ok'>✓</td><td class='ok'>✓</td><td class='ok'>✓</td><td class='ok'>✓</td><td class='ok'>✓</td><td>91.66666666666666%</td></tr><tr><td><b>D_divergent</b></td><td class='no'>✗</td><td class='ok'>✓</td><td class='ok'>✓</td><td class='ok'>✓</td><td class='ok'>✓</td><td class='no'>✗</td><td class='no'>✗</td><td class='ok'>✓</td><td class='no'>✗</td><td class='ok'>✓</td><td class='no'>✗</td><td class='ok'>✓</td><td>58.333333333333336%</td></tr><tr><td><b>E_verifier</b></td><td class='no'>✗</td><td class='ok'>✓</td><td class='ok'>✓</td><td class='ok'>✓</td><td class='ok'>✓</td><td class='no'>✗</td><td class='ok'>✓</td><td class='no'>✗</td><td class='ok'>✓</td><td class='ok'>✓</td><td class='no'>✗</td><td class='ok'>✓</td><td>66.66666666666666%</td></tr></table>
+<script>const acc = {"A_direct": 83.3, "B_majority": 91.7, "C_selfconsistency": 91.7, "D_divergent": 58.3, "E_verifier": 66.7};
+new Chart(document.getElementById('acc'), {type:'bar', data:{labels:Object.keys(acc), datasets:[{data:Object.values(acc), backgroundColor:['#64748b','#22d3ee','#a855f7','#f59e0b','#4ade80']}]}, options:{plugins:{legend:{display:false}, title:{display:true,text:'Accuracy % (準確率)'}}, scales:{y:{max:100}}}});
+const perq = {"A_direct": [1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1], "B_majority": [1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1], "C_selfconsistency": [1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1], "D_divergent": [0, 1, 1, 1, 1, 0, 0, 1, 0, 1, 0, 1], "E_verifier": [0, 1, 1, 1, 1, 0, 1, 0, 1, 1, 0, 1]};
+new Chart(document.getElementById('perq'), {type:'bar', data:{labels:["Q0", "Q1", "Q2", "Q3", "Q4", "Q5", "Q6", "Q7", "Q8", "Q9", "Q10", "Q11"], datasets:Object.keys(perq).map(k=>({label:k,data:perq[k],stack:'s',backgroundColor:'#334155'}))}, options:{plugins:{legend:{labels:{color:'#cbd5e1'}}}, scales:{x:{stacked:true},y:{stacked:true,max:1}}}});
+</script></body></html>
