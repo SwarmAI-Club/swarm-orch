@@ -10,6 +10,10 @@ Cross-timezone, asynchronous compute sharing for home GPUs. MIT · [swarmai.club
 Home users lend their GPU during their local night / idle hours (Proof-of-Uptime, earning **SWAI token units**, off-chain settlement).
 When they need heavy AI work during their day, they call on GPUs of users currently sleeping in other time zones — a "reverse sundial" of idle compute. Open, auditable, decentralized — no big-tech data center required.
 
+**The faith that guides it** (community covenant):
+
+> SwarmAI is built by its members — a mutual-aid AI network using each person's idle time to create maximum value. It doesn't demand the most cutting-edge agent; simply the willingness to build on what exists. The Club grows healthy and positive, expanding in scale, upgrading continuously, refining the in-group experience — with empathy and mutual support, moving into the future together. Everyone who's willing to build is a member.
+
 ## Architecture
 
 ```
