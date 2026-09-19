@@ -62,11 +62,28 @@ MILESTONES.md（cluster tracker）+ 本 ROADMAP。
 - `docs/TOKENOMICS.md`（mint/burn 規則、供應通脹建議、on-chain 遷移）
 - 口徑：網頁/README 由「點數 Credit」改為「SWAI token（off-chain 分帳）」
 
+### M9 ✅ 平台化：keys scope + 每日 burn quota + node 綁定 + 私隱保證 — done 2026-09-19
+- Keys 分 `full/client/worker` scope；last-used IP/time 追蹤；revoke 即時
+- 每日 burn 上限（`SWARM_DAILY_BURN_CAP`=2000/d）；node_id 綁定擁有人（防冒充）
+- 任務內容零保留（ephemeral）；log 只 metadata；`[img]` prompt log 洩漏已修
+- Telegram 社群管家 bot（group 監察/廣播/好意見）
+
+### M10 ✅ 自己機優先 + USDC 充值 + specialty — done 2026-09-19
+- `dispatch_pref`（self/fastest/free-first）：自己機優先免費、balance 唔夠 fallback 自己機+free
+- USDC on Polygon 充值（1 USDC=100 SWAI，min 5）：deposits 表 + `scanPolygonTx`
+- 離線偵測（>5min 唔派工）+ per-node Free/sleep/share/suspend/移除 portal 管理
+- Specialty node：`swarmai-image`（SD-WebUI）/ `swarmai-video`（Wan）adapter + `/v1/images/generations`
+- Portal 充值卡／新增 node modal／時區互補 homepage
+- `docs/ARCHITECTURE.md` §10b/10c/10d + `docs/ECONOMY.md` §10-12 + SUPPORT_BOT.md 社群管家 section
+
 ## Out of scope / Later
 - libp2p / NAT punch（Phase 3）
 - ~~Token ledger~~ → SWAI token（M8 定案：off-chain，on-chain 排期）
 - WASM sandbox（先 Docker）
 - Federated fine-tune / speculative decoding over WAN（research，未排期）
+- **USDC 充值自動掃鏈**：MVP 依賴 `/portal/topup/submit`（人手提交 tx）；自動 `setInterval` scan blockchain 係將來
+- Wan/ComfyUI video adapter：stub，待填 `WAN_API_URL` 實作
+- 收益回流聲明（開發/model upgrade/自研 model）網頁承諾：政策層，暫未上網站
 
 ## License
 MIT — free for all. See `LICENSE`.

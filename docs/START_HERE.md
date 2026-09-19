@@ -16,7 +16,7 @@ SwarmAI 係一個**跨時區嘅去中心化 AI 算力網絡**：
 - **私隱唔出街** — 遠端任務只喺沙盒入面行（讀唔到你部機）；Notebook 私密數據由本地過濾器遮罩先出網。
 - **絕唔係 Skynet** — 冇中央大腦、個個手動可拔線、算力打散喺人間 = 算力民主化。
 
-**時間線：** 而家 5 節點（全 Qwythos）已 live 測試中；外部家用機 P2P 接入（libp2p 打洞）排緊隊。想領先加入，email `support@swarmai.club`。
+**時間線：** 而家 6 節點（全 Qwythos + Qwen-VL vision）已 live 測試中；外部家用機 P2P 接入（libp2p 打洞）排緊隊。想領先加入：Telegram **@SwarmAI_Club_bot**（24/7）或加入用戶群組 `https://t.me/+j2fjMm0IzO43ODU1`；email `support@swarmai.club`。
 
 ---
 
@@ -42,7 +42,8 @@ SwarmAI 係一個**跨時區嘅去中心化 AI 算力網絡**：
 - Worker/Agent 之後指去 `--router https://swarmai.club/swarm/`（帶 `X-Swarm-Token`）就得，任何數量用戶都 OK（Cloudflare front）。
 
 - **你嘅 token** = `X-Swarm-Token` header，Router 啟動用 `SWARM_API_TOKEN` 設定。
-- 我哋/買 key：email `support@swarmai.club`（或自架指定）。
+- **自己機優先**：你自己機上線 → 派工免費自用；SWAI 唔夠會自動落返你自己機+free machine（詳見 Portal Profile「派工狀態」）。
+- **充值（可選）**：Portal「⚡ 充值」卡 —— USDC on Polygon 入帳（1 USDC = 100 SWAI，最低 5）。
 - 冇 token 一律 `401`。
 
 ### 3b. Router（主節點，起中樞）

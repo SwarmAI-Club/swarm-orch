@@ -39,3 +39,17 @@ Long-poll Telegram bot，無需 framework（stdlib + requests）。FAQ 自動回
 3. 重啟 bot（kill 舊 process + re-launch）
 
 > ✅ 2026-09-17: 已改用 **專屬 token**（@SwarmAI_Club_bot）＋ **flock 單一 instance 保證**（任何 respawner 都起唔到第二隻）＋ admin 通知包含**客戶名稱**（first_name/username）；code **只讀 `SWARM_SUPPORT_BOT_TOKEN`**（唔再 fallback 去 opencode token），並有 **409 startup guard** —— 唔會再同 opencode-telegram 搶。
+
+## 社群管家 mode（group，2026-09-19）
+
+放 bot 入用戶群組，做 **監察 + 廣播 + 好意見收集**（唔係自動客服）：
+
+- 設定：`swarm-support-bot.env` 加 `SWARM_GROUP_CHAT=<group chat id>`（負數）
+- **行為**：
+  - Group 內**普通訊息唔回**（保持討論流暢）；只有 `@SwarmAI_Club_bot` tag 或 `/命令` 先觸發客服
+  - **惡意 keyword**（`ABUSE_KW`，保守名單）→ **漸進式**：① 初犯＝`deleteMessage`＋通知 admin ② 再犯＝刪＋`restrictChatMember` 禁言 1hr ③ 三犯＝刪＋`banChatMember` 封鎖；每次 action 通知 admin
+  - **好意見 keyword**（`PRAISE_KW`：建議/意見/好好/改進…）→ 轉發俾 admin（附使用者）
+  - 違規計數存 `swarm-support-community.json`（watchdog restart 唔會清）
+- **Admin 指令**（admin chat 用）：`/broadcast <msg>` 廣播去群組｜`/ban <uid>`｜`/unban <uid>`｜`/mute <uid> [分鐘]`
+- ⚠️ **前提**：bot 必須喺群組做 **Admin**（Dele/Ban/Restrict 權限）先執行到。
+- 群組：`https://t.me/+j2fjMm0IzO43ODU1`（主群 `-1004483714356`）

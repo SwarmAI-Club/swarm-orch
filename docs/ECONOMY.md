@@ -102,3 +102,27 @@
 ## 9. API 認證
 - `Authorization: Bearer <token>` 或 `Bearer sk-swai-<token>`（`sk-` 只係 OpenAI 相容前綴，router 自動剝落）
 - worker `--token` 同 `--router-secret` 必填（router 派工簽名用後者）
+
+## 10. 自己機優先派工（2026-09-19）
+- `users.dispatch_pref`：`self`（預設）｜`fastest`｜`free-first`。Portal Profile 可改。
+- `matchCapabilities(required, candidates, reqAcc)`：自己 account 嘅 node **score × 1.5**（優先派自己）。
+- **派工限制**：`pref != fastest` 且有自己機上線 → 淨派自己機（唔夠先落出面）；`pref=free-first` → 自己機 + free node 一齊優先。
+- **收費三層**（`/task` `/v1/chat` `/v1/images`）：
+  - 全部自己機 → `mode:"self"` **唔 burn**（自己機免費）
+  - 有 free node 參與 → `mode:"free"` **唔 burn**（free_served=true）
+  - 出面付費 node → `mode:"paid"` burn（tokens/tier）
+  - **balance 或每日 quota 唔夠** → `mode:"fallback"` 自動落返「自己機 + free machine」**照做免費**（有先）；真冇先 402/429
+- **API 表明**：`/v1/chat` `/task` `/v1/images` response 加 `swarmai.mode`（self/paid/fallback/free）+ `notice`；`/portal/me` 有 `dispatch:{pref,mode,notice}`。
+- **離線偵測**：node >5min 冇心跳（`SWARM_NODE_STALE_MS`，default 5min）＝offline → 唔派工、portal 顯示 🟡；唔 auto-purge（手動移除）。
+
+## 11. USDC on Polygon 充值（2026-09-19）
+- **兌換率**：`1 USDC = SWAI_USDC_RATE` SWAI（default **100**）；`MIN_USDC_TOPUP`（default **5** USDC）。
+- **收款**：`SWARM_DEPOSIT_WALLET`（單一 Polygon address）+ `POLYGON_RPC`（default polygon-rpc.com）+ `POLYGON_USDC` contract（default native USDC 0x3c49…）。
+- **流程**：`/portal/topup` 攞地址 → 用戶轉 USDC (Polygon) → `/portal/topup/submit {tx}` → `scanPolygonTx()`（`eth_getTransactionReceipt` 掃 USDC `Transfer` event log）→ 確認 amount ≥ min 先 `ledgerMint` kind=`deposit`。
+- **deposits 表**：`tx_hash` PK + account/sender/amount_usdc/swai/confirmations/processed。
+- 定位：收費參考市場同級 model **50% off**；淨收益回流平台開發 / model upgrade / 自研 model（政策層面，唔喺 code）。
+
+## 12. Specialty（image/video）計費
+- `swarmai-image`（image-gen）：20 SWAI/job（`SWAI_IMAGE_UNIT_PRICE`），max 4 units
+- `swarmai-video`（video-gen）：80 SWAI/job（`SWAI_VIDEO_UNIT_PRICE`），max 8 units
+- 計費行 `units × unitPrice`，ledger `units` 欄；同一 system 支援自己機優先 + fallback
