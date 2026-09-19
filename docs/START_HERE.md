@@ -39,6 +39,22 @@ SwarmAI 係一個**跨時區嘅去中心化 AI 算力網絡**：
 
 - **公開入口（唔使 VPN/Tailscale）**：開 `https://swarmai.club/portal/` → Sign up（email + password）→ 即攞你嘅 API token + node_id。
 - 登入後頁面會顯示你嘅 **SWAI 點數** 同分錄。
+
+### 🧪 新用戶安裝流程 Smoke Test（mainpc 每日自動）
+
+mainpc 每日 09:30 自動跑 `agent-core/install-smoke-daily.sh`（開全新 email → 落單 → 起 mock worker 註冊 → 驗證），結果喺 `/mnt/d/node-log/install-smoke.log` + `install-smoke.status`。手動跑：
+
+```bash
+bash /mnt/d/docker_nginx/agent-core/install-smoke-daily.sh
+cat /mnt/d/node-log/install-smoke.status   # PASS / FAIL
+```
+
+外部用戶（US/UK/AU 等）想實測：照 howto.html 步驟真正裝一次 worker（`--pull` mode）就得，或者仿真測試：
+```bash
+git clone https://github.com/SwarmAI-Club/swarm-orch && cd swarm-orch
+pip install requests
+python3 benchmarks/install_test.py --router https://swarmai.club/swarm --worker 0 --email 你嘅新email
+```
 - Worker/Agent 之後指去 `--router https://swarmai.club/swarm/`（帶 `X-Swarm-Token`）就得，任何數量用戶都 OK（Cloudflare front）。
 
 - **你嘅 token** = `X-Swarm-Token` header，Router 啟動用 `SWARM_API_TOKEN` 設定。
