@@ -48,8 +48,10 @@ SwarmAI 提供 OpenAI 兼容端點 — 直接 replace 任何 OpenAI client 嘅 b
 - **Models**:
   - `swarmai-fast` — 派去 S/A tier 勁機（5090/4090/2080Ti），收費貴（×1.8/×1.3）
   - `swarmai-normal` — 派去 B/C tier 平機，收費平（×1.0/×0.6）
+  - `swarmai-image` — 圖像生成（SD-WebUI/ComfyUI adaptive worker），每張 ~20 SWAI
+  - `swarmai-video` — 視訊生成（Wan adapter），每條 ~80 SWAI
   - vision 自動分流：messages 含 base64 `image_url` → 自動用 qwen2.5-vl
-- **收費**: 按 tokens（in 5000t/SWAI、out 1000t/SWAI × tier 倍率）；balance 唔夠 → 402
+- **收費**: 按 tokens（in 5000t/SWAI、out 1000t/SWAI × tier 倍率）；balance 唔夠 → 自動 fallback 自己機+free machine（Profile 有派工狀態）；連 fallback 都冇先 402
 
 ### curl 例子
 ```bash
@@ -94,5 +96,8 @@ r = client.chat.completions.create(
 ```json
 {"choices":[{"message":{"role":"assistant","content":"..."}}],
  "usage":{"prompt_tokens":..,"completion_tokens":..},
- "swarmai":{"nodes":[...],"votes":[...],"confidence":..,"est_fee":..}}
+ "swarmai":{"nodes":[...],"votes":[...],"confidence":..,"est_fee":..,
+            "mode":"self|paid|fallback|free",        // 派工模式（自己機免費/出面付費/降級自己機/free node）
+            "notice":"SWAI 唔夠 → 已自動落返自己機 + free machine（免費）"}}
 ```
+> `swarmai.mode=fallback` 代表 token 唔夠自動用緊自己機（唔扣）；想用出面機就登入 portal 充值（USDC，1:100）。

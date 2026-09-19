@@ -9,10 +9,15 @@
 - 自己機優先（免費），唔扣。
 - 而家係 **off-chain settlement**（router 內 SQLite ledger，單位叫 `SWAI`）。
 
-## 2. Mint / Burn 規則（off-chain，已實現）
-- Mint：`credit = max(1, round(gpu_min × RATE))`，RATE 現時 env `SWARM_CREDIT_RATE_PM = 10 SWAI/min`。
-- /vote 完成任務自動 mint 俾每個 provider（按 `duration_ms`）。
-- Burn：requester 提交任務扣 SWAI；餘額唔足會 clamp，唔會負數。
+## 2. Mint / Burn 規則（off-chain，已實現）— v2 token-based（2026-09-19）
+> 詳見 `docs/ECONOMY.md` §1-3。舊 GPU-min 制已換成 **token-based**：
+- **Mint**：
+  - Idle（Proof-of-Uptime）：兩次 `IDLE_SHARING` 心跳 × node.speed → tokens → `RATE_OUT`(1000 tok/SWAI) 折算。
+  - Task vote：provider 按實際 `tokens_in/out`（`RATE_IN` 5000 / `RATE_OUT` 1000）。
+  - Specialty（image/video）：`units × unitPrice`。
+  - **USDC 充值**（2026-09-19）：`deposits` 表；1 USDC = 100 SWAI。
+- **Burn**：/task 先按估算 tokens burn（防 spam），/vote 後精算退款；每日有 quota（2000/d）。
+- **自己機優先（2026-09-19）**：自己 account 機 → 唔扣；balance 唔夠自動 fallback 自己機+free machine（唔硬 402）。
 - 抑制 spam：細任務至少 1 SWAI（可日後改比例上限）。
 
 ## 3. 供應與通脹（建議值，未定案）
