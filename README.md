@@ -14,6 +14,8 @@ When they need heavy AI work during their day, they call on GPUs of users curren
 
 > SwarmAI is built by its members — a mutual-aid AI network using each person's idle time to create maximum value. It doesn't demand the most cutting-edge agent; simply the willingness to build on what exists. The Club grows healthy and positive, expanding in scale, upgrading continuously, refining the in-group experience — with empathy and mutual support, moving into the future together. Everyone who's willing to build is a member.
 
+**Collective Intelligence vision**: the group keeps attracting free developers who build on this platform — more handy tools, autonomous agents, and project-owned models for everyday users — evolving from *shared compute* into *shared intelligence*, a growing collective mind.
+
 ## Architecture
 
 ```
