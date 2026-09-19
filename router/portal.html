@@ -122,20 +122,52 @@ th{color:var(--acc)}
     <div class="card">
       <div class="muted" style="margin-bottom:8px">📊 節點評分（User Profile Stats）</div>
       <table>
-        <thead><tr><th>Node</th><th>Tier</th><th>Model</th><th>Ctx</th><th>tok/s</th><th>Grade</th><th>Abilities</th><th>Free</th></tr></thead>
+        <thead><tr><th>Node</th><th>Tier</th><th>Model</th><th>Ctx</th><th>tok/s</th><th>Grade</th><th>Abilities</th></tr></thead>
         <tbody id="profile-nodes"></tbody>
       </table>
-      <input type="checkbox" id="pf-free-chk" onchange="toggleNodeFree()" style="width:auto"> 將此 node 設為 <b>Free</b>（其他人用唔 burn，你照收 mint）<br>
-      <div class="muted" style="font-size:.8rem;margin-top:4px">⚠️ Free 嘅 node 會被任何較成熟用戶免費使用 —— 世界唔完美，濫用風險存在，揀 node 有 rating guard。想 100% 安全就唔好開 free。</div>
+      <div class="muted" id="pf-status" style="margin-top:6px"></div>
+    </div>
+    <div class="card">
       <div class="muted" id="profile-eco" style="margin-top:8px"></div>
     </div>
     <div class="card">
-      <div class="muted" style="margin-bottom:8px">⚙️ Per-node 設定（sleep / share / suspend / 移除）— 每部 node 獨立覆寫 user 預設</div>
+      <div class="muted" style="margin-bottom:8px">⚙️ Per-node 設定（Free / sleep / share / suspend）— 每部 node 獨立覆寫 user 預設</div>
       <table>
-        <thead><tr><th>Node</th><th>睡眠開始 (0-23)</th><th>睡眠結束 (0-23)</th><th>share % (0-100)</th><th>Suspend</th><th>移除 / 重啟</th><th></th></tr></thead>
+        <thead><tr><th>Node</th><th>狀態</th><th>Free</th><th>睡眠開始 (0-23)</th><th>睡眠結束 (0-23)</th><th>share % (0-100)</th><th>Suspend</th><th>移除 / 啟用</th><th></th></tr></thead>
         <tbody id="pn-rows"></tbody>
       </table>
-      <div class="muted" style="font-size:.78rem;margin-top:4px">留空 = 跟 user 預設（sleep 用 Profile 嗰兩格；share 用「新機預設 share」）。Suspend on = 暫時唔接任何工。Remove = 換機／唔要部機：即刻剔走出網絡，心跳唔會復活（重裝返同 node_id 就自動啟用）。<br>➕ 加一部新機：照 <code>howto.html</code> 再起一個 worker，用同一個 API token ＋ 新 <code>--node-id</code>（例如 <code>client-xxx-2</code>），呢度自動多一行。</div>
+      <div style="margin-top:8px"><button style="width:auto;padding:8px 16px;margin:0" onclick="showAddNode()">➕ 新增 node</button></div>
+      <div class="muted" style="font-size:.78rem;margin-top:4px">留空 = 跟 user 預設（sleep 用 Profile 嗰兩格；share 用「新機預設 share」）。Free = 免費永久共享（其他人用唔 burn，你照收 mint）。Suspend = 暫時唔接任何工。Remove = 換機／唔要部機：即刻剔走網絡（心跳唔會復活；重裝返同 node_id 或撳「啟用」就復上）。New node 係喺<b>你自己部機</b>起 worker —— portal 只係管理上線狀態同設定。</div>
+    </div>
+
+    <!-- 新增 node modal -->
+    <div id="addnode-modal" class="hide" style="position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:99;display:none;align-items:center;justify-content:center">
+      <div style="background:var(--card);border:1px solid #1f2937;border-radius:14px;max-width:640px;width:94%;padding:22px;max-height:86vh;overflow:auto">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <b>➕ 新增 node（喺你部機做）</b>
+          <button style="width:auto;padding:4px 12px;margin:0" onclick="hideAddNode()">✕</button>
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:8px">
+          <button style="width:auto;padding:6px 14px;margin:0" onclick="addCmd('linux')">Linux/Docker</button>
+          <button style="width:auto;padding:6px 14px;margin:0" onclick="addCmd('mac')">macOS</button>
+          <button style="width:auto;padding:6px 14px;margin:0" onclick="addCmd('win')">Windows</button>
+        </div>
+        <pre id="add-cmd" style="font-size:.72rem;white-space:pre-wrap;word-break:break-all"></pre>
+        <div style="margin-top:8px"><button style="width:auto;padding:8px 16px;margin:0" onclick="copyCmd()">📋 複製</button> <span class="muted" id="add-cmd-note"></span></div>
+        <div class="muted" style="font-size:.78rem;margin-top:8px">起返之後（心跳 ~30s），呢張表自動多一行。</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="muted" style="margin-bottom:8px">⚡ 充值 USDC（Polygon 網絡）— 1 USDC = <span id="tp-rate">100</span> SWAI</div>
+      <div id="tp-dispatch" style="font-size:.82rem;margin-bottom:8px"></div>
+      <div class="muted" style="font-size:.82rem;margin-bottom:6px">收款地址（單一入帳，系統自動認先：submit tx 核實入帳）：</div>
+      <code id="tp-wallet" style="display:block;word-break:break-all;margin-bottom:8px">—</code>
+      <div class="muted" style="font-size:.78rem;margin-bottom:8px"><b>步驟</b>：① 用任何錢包（MetaMask/Trust/交易所）選 <b>Polygon 網絡</b> 轉 USDC 到上面收款地址（最低 5 USDC）② 確認後喺下面貼返 tx hash 撳「核實入帳」，或等我自動掃描。</div>
+      <div style="display:flex;gap:8px">
+        <input id="tp-tx" placeholder="0x…（tx hash）" style="flex:1">
+        <button style="width:auto;padding:9px 16px;margin:0" onclick="submitTopup()">核實入帳</button>
+      </div>
+      <div class="muted" id="tp-status" style="margin-top:6px"></div>
     </div>
     <div class="card">
       <div class="muted" style="margin-bottom:8px">🤖 用 OpenAI-compatible API（直接 replace 任何 OpenAI 地址）</div>
@@ -230,11 +262,15 @@ async function loadMe(){
       const rt=n.rating||{};
       const ab=n.abilities||{};
       const abStr = n.abilities ? [ab.tools&&'🔧tools',ab.thinking&&'🧠thinking',ab.vision&&'👁vision'].filter(Boolean).join(' ') : '—';
-      return `<tr><td>${n.node_id||''}</td><td>${n.tier||'-'}</td><td>${n.model||'-'}</td><td>${n.ctx||0}</td><td>${n.speed||0}</td><td><b>${rt.grade||'-'}</b> (${rt.score||0})</td><td>${abStr}</td><td>${n.free?'✅':'—'}</td></tr>`;
+      return `<tr><td>${n.node_id||''}</td><td>${n.tier||'-'}</td><td>${n.model||'-'}</td><td>${n.ctx||0}</td><td>${n.speed||0}</td><td><b>${rt.grade||'-'}</b> (${rt.score||0})</td><td>${abStr}</td></tr>`;
     }).join('');
-    E('profile-nodes').innerHTML = rows || '<tr><td colspan="8" class="muted">未有節點上線 — 用你 API token 起 worker 就有</td></tr>';
+    E('profile-nodes').innerHTML = rows || '<tr><td colspan="7" class="muted">未有節點上線 — 用 API token 起 worker 就有</td></tr>';
     E('profile-eco').textContent = d.economy_note || '';
-    // 填 profile 表單（一次性，唔覆蓋用戶已輸入）
+    if (d.dispatch) E('tp-dispatch').textContent = `🪄 派工狀態：${d.dispatch.mode}（策略：${d.dispatch.pref}）— ${d.dispatch.notice||''}`;
+    if (d.topup) {
+      if (E('tp-rate')) E('tp-rate').textContent = d.topup.rate;
+      if (E('tp-wallet')) E('tp-wallet').textContent = d.topup.wallet || '（收款地址未設定 — 之後加到）';
+    }
     if (d.profile) {
       const pf = d.profile;
       if (!document.__pfSeed) {
@@ -245,12 +281,6 @@ async function loadMe(){
         if (E('pf-model')) E('pf-model').value = pf.pref_model || 'swarmai-normal';
         if (E('pf-share')) E('pf-share').value = pf.share_default ?? 100;
         document.__pfSeed = true;
-      }
-      // free checkbox：預設揀第一個 node 嘅 free 狀態
-      if (E('pf-free-chk') && (d.nodes||[]).length && !document.__pfFreeSeed) {
-        document.__curNode = d.nodes[0].node_id;
-        E('pf-free-chk').checked = !!d.nodes[0].free;
-        document.__pfFreeSeed = true;
       }
     }
     loadKeys();
@@ -265,19 +295,24 @@ async function loadNodeSettings(nodes){
     const st = n.settings||{};
     const sid = 'pn-'+n.node_id.replace(/[^a-zA-Z0-9_-]/g,'_');
     const removed = st.removed;
+    const online = n.online;
+    const badge = removed ? '<span class="muted">⚪ 已移除</span>'
+      : (online ? '<span>🟢 上線</span>' : ('<span>🟡 離線'+(n.last_seen_min!=null?' '+n.last_seen_min+'min':'')+'</span>'));
     const action = removed
-      ? `<button style="width:auto;padding:5px 12px;margin:0" onclick="enableNode('${n.node_id}')">啟用</button>`
-      : `<button style="width:auto;padding:5px 12px;margin:0" onclick="removeNode('${n.node_id}')">移除</button>`;
-    return `<tr>
-      <td><code>${n.node_id||''}</code>${removed?' <span class="muted">(已移除)</span>':''}</td>
-      <td><input id="${sid}-ss" type="number" min="0" max="23" style="width:62px" value="${st.sleep_start_hour??''}" placeholder="−" ${removed?'disabled':''}></td>
-      <td><input id="${sid}-se" type="number" min="0" max="23" style="width:62px" value="${st.sleep_end_hour??''}" placeholder="−" ${removed?'disabled':''}></td>
-      <td><input id="${sid}-sh" type="number" min="0" max="100" style="width:62px" value="${st.share_ratio??''}" placeholder="−" ${removed?'disabled':''}></td>
-      <td><input id="${sid}-sp" type="checkbox" style="width:auto" ${st.suspend?'checked':''} ${removed?'disabled':''}></td>
-      <td>${action}</td>
-      <td><button style="width:auto;padding:5px 12px;margin:0" onclick="saveNodeSettings('${n.node_id}')" ${removed?'disabled':''}>存</button></td>
-    </tr>`;
-  }).join('') || '<tr><td colspan="7" class="muted">未有節點</td></tr>';
+      ? '<button style="width:auto;padding:5px 12px;margin:0" onclick="enableNode(\''+n.node_id+'\')">啟用</button>'
+      : '<button style="width:auto;padding:5px 12px;margin:0" onclick="removeNode(\''+n.node_id+'\')">移除</button>';
+    return '<tr>'+
+      '<td><code>'+n.node_id+'</code></td>'+
+      '<td>'+badge+'</td>'+
+      '<td><input id="'+sid+'-fr" type="checkbox" style="width:auto" '+(st.free?'checked':'')+' '+(removed?'disabled':'')+'></td>'+
+      '<td><input id="'+sid+'-ss" type="number" min="0" max="23" style="width:56px" value="'+(st.sleep_start_hour??'')+'" placeholder="−" '+(removed?'disabled':'')+'></td>'+
+      '<td><input id="'+sid+'-se" type="number" min="0" max="23" style="width:56px" value="'+(st.sleep_end_hour??'')+'" placeholder="−" '+(removed?'disabled':'')+'></td>'+
+      '<td><input id="'+sid+'-sh" type="number" min="0" max="100" style="width:56px" value="'+(st.share_ratio??'')+'" placeholder="−" '+(removed?'disabled':'')+'></td>'+
+      '<td><input id="'+sid+'-sp" type="checkbox" style="width:auto" '+(st.suspend?'checked':'')+' '+(removed?'disabled':'')+'></td>'+
+      '<td>'+action+'</td>'+
+      '<td><button style="width:auto;padding:5px 12px;margin:0" onclick="saveNodeSettings(\''+n.node_id+'\')" '+(removed?'disabled':'')+'>儲存</button></td>'+
+    '</tr>';
+  }).join('') || '<tr><td colspan="9" class="muted">未有節點</td></tr>';
 }
 
 async function removeNode(node_id){
@@ -302,9 +337,39 @@ async function saveNodeSettings(node_id){
   if(se!=='') body.sleep_end_hour = Number(se);
   if(sh!=='') body.share_ratio = Number(sh);
   body.suspend = E(sid+'-sp').checked;
+  if (E(sid+'-fr')) body.free = E(sid+'-fr').checked;
   const r = await fetch('/portal/node_settings', {method:'POST', headers:{'content-type':'application/json','x-swarm-token':window.__tok}, body: JSON.stringify({node_id, ...body})});
   const d = await r.json();
   if(d.ok){ alert('已儲存 '+node_id); loadMe(); } else alert(I('p_j_fail')+(d.error||''));
+}
+
+function showAddNode(){ E('addnode-modal').style.display='flex'; addCmd('linux'); }
+function hideAddNode(){ E('addnode-modal').style.display='none'; }
+let __addCmd = '';
+function addCmd(plat){
+  const tok = window.__tok || '<你的API token>';
+  const nid = (window.__nodeId||'client-xxx') + '-2';
+  let cmd = '';
+  if(plat==='linux') cmd = '# 0) 起 model\n./llama-server -m /path/to/Qwythos-9B.gguf --host 127.0.0.1 --port 8080 -ngl 99\n\ngit clone https://github.com/SwarmAI-Club/swarm-orch.git && cd swarm-orch\n\n# 1) 起 worker（--pull 模式 NAT 安全）\npython3 -m pip install requests\npython3 worker-node/worker.py --router https://swarmai.club/swarm \\\n  --token "'+tok+'" --node-id '+nid+' \\\n  --completion http://127.0.0.1:8080/completion \\\n  --capabilities reasoning math code --pull --heartbeat 30';
+  else if(plat==='mac') cmd = '# macOS（Apple Silicon，唔使 Docker）\n# 起 model：llama.cpp macOS 預編譯 binary\n./llama-server -m /path/to/Qwythos-9B.gguf --port 8080 -ngl 99\n\ngit clone https://github.com/SwarmAI-Club/swarm-orch.git && cd swarm-orch\npip3 install requests\n\npython3 worker-node/worker.py --router https://swarmai.club/swarm \\\n  --token "'+tok+'" --node-id '+nid+' \\\n  --completion http://127.0.0.1:8080/completion \\\n  --capabilities reasoning math code --pull --heartbeat 30';
+  else cmd = '# Windows（PowerShell + Python 3.11）\n# 起 model：llama-server.exe\n.\\.\\llama-server.exe -m Qwythos-9B.gguf --port 8080 -ngl 99\n\ngit clone https://github.com/SwarmAI-Club/swarm-orch.git\ncd swarm-orch\npip install requests\n\npython worker-node/worker.py --router https://swarmai.club/swarm --token "'+tok+'" \\\n  --node-id '+nid+' --completion http://127.0.0.1:8080/completion \\\n  --capabilities reasoning math code --pull --heartbeat 30';
+  __addCmd = cmd;
+  E('add-cmd').textContent = cmd;
+  E('add-cmd-note').textContent = 'node-id: '+nid+'（可改）';
+}
+function copyCmd(){
+  if(!__addCmd) return;
+  (navigator.clipboard ? navigator.clipboard.writeText(__addCmd) : Promise.reject()).then(()=>{ E('add-cmd-note').textContent='✅ 已複製'; }).catch(()=>{
+    const ta=document.createElement('textarea'); ta.value=__addCmd; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); E('add-cmd-note').textContent='✅ 已複製';
+  });
+}
+async function submitTopup(){
+  const tx = E('tp-tx').value.trim();
+  if(!tx){ E('tp-status').textContent='請輸入 tx hash'; return; }
+  E('tp-status').textContent='核實中…';
+  const r = await fetch('/portal/topup/submit', {method:'POST', headers:{'content-type':'application/json','x-swarm-token':window.__tok}, body: JSON.stringify({tx})});
+  const d = await r.json();
+  E('tp-status').textContent = d.ok ? (d.status==='credited' ? '✅ 已入帳 +'+d.swai+' SWAI' : '⏳ tx 已提交，等待確認（稍後會自動入帳）') : '❌ '+(d.error||'核實失敗');
 }
 
 async function loadKeys(){
@@ -332,14 +397,6 @@ async function revokeKey(tok){
 
 function logout(){ location.reload(); }
 
-async function toggleNodeFree(){
-  if(!window.__curNode) return;
-  try{
-    const r = await fetch('/portal/node_toggle', {method:'POST', headers:{'content-type':'application/json','x-swarm-token':window.__tok}, body: JSON.stringify({node_id:window.__curNode, free: E('pf-free-chk').checked})});
-    const d = await r.json();
-    if(!d.ok) E('pf-status').textContent='❌ '+d.error;
-  }catch(e){}
-}
 async function redeemCoupon(){
   const code = E('coupon-input').value.trim();
   if(!code){ E('coupon-status').textContent='請輸入 code'; return; }
