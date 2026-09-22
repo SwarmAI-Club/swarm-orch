@@ -144,12 +144,12 @@ function accountForToken(t) {
 // ---- Logical model map (OpenAI gateway) ----
 // 對外 model ID → 派工群組 + tier 收費倍率
 const MODEL_MAP = {
-  "swarmai-fast":     { cap: ["reasoning", "analysis"], tier: ["S", "A"], n_votes: 3, label: "勁機優先（5090/4090/2080Ti），貴" },
-  "swarmai-normal":   { cap: ["reasoning", "math"], tier: ["B", "C"], n_votes: 3, label: "日常平價（3060/2060 及以下）" },
-  "swarmai-vision": { cap: ["vision"], tier: ["S", "A", "B", "C"], n_votes: 1, vision: true, hidden: true, label: "Vision (auto-route, 唔對外顯示)" },
-  "swarmai-free":     { cap: ["reasoning", "math", "analysis"], tier: ["S", "A", "B", "C"], n_votes: 3, freeOnly: true, label: "免費 node（自由分享）——唔扣費" },
-  "swarmai-image":    { cap: ["image-gen"], tier: ["A", "B", "C"], n_votes: 1, unit: true, unitPer: "job", unitPrice: IMAGE_UNIT_PRICE, max_units: 4, label: "圖像生成（SD-WebUI/ComfyUI adapter）——每張按 unit 計" },
-  "swarmai-video":    { cap: ["video-gen"], tier: ["A", "B", "C"], n_votes: 1, unit: true, unitPer: "job", unitPrice: VIDEO_UNIT_PRICE, max_units: 8, label: "視訊生成（Wan adapter）——每條按 unit 計" },
+  "swarmai-fast":     { cap: ["reasoning", "analysis"], tier: ["S", "A"], n_votes: 1, votable: true, strategy: "fastest", label: "勁機優先（極速）— 最快 S/A tier GPU" },
+  "swarmai-normal":   { cap: ["reasoning", "math"], tier: ["B", "C"], n_votes: 1, votable: true, strategy: "self-first", label: "日常平價（省錢）— 自己機優先 B/C tier" },
+  "swarmai-vision": { cap: ["vision"], tier: ["S", "A", "B", "C"], n_votes: 1, votable: false, strategy: "fastest", vision: true, hidden: true, label: "Vision (auto-route)" },
+  "swarmai-free":     { cap: ["reasoning", "math", "analysis"], tier: ["S", "A", "B", "C"], n_votes: 1, votable: true, strategy: "self-then-free", freeOnly: true, label: "免費節點（完全免費）— 自己機優先，then free nodes" },
+  "swarmai-image":    { cap: ["image-gen"], tier: ["A", "B", "C"], n_votes: 1, votable: false, strategy: "fastest", unit: true, unitPer: "job", unitPrice: IMAGE_UNIT_PRICE, max_units: 4, label: "圖像生成（SD/ComfyUI）" },
+  "swarmai-video":    { cap: ["video-gen"], tier: ["A", "B", "C"], n_votes: 1, votable: false, strategy: "fastest", unit: true, unitPer: "job", unitPrice: VIDEO_UNIT_PRICE, max_units: 8, label: "視訊生成（Wan）" },
 };
 // tier 收費倍率（需求方）同一緊 mint（供應方）用
 const TIER_RATE = { S: 1.8, A: 1.3, B: 1.0, C: 0.6 };       // 需求方收費
@@ -389,6 +389,11 @@ function mkToken() { return "swai-" + crypto.randomBytes(16).toString("hex"); }
 function findUserByToken(t) {
   return db.prepare("SELECT u.email, u.node_id, u.created AS acct_created, k.token, k.label, k.scope, k.last_used_at, k.last_ip FROM user_keys k JOIN users u ON u.email=k.email WHERE k.token=?").get(String(t));
 }
+function findUserByNode(node_id) {
+  const owner = nodeOwner(node_id);
+  if (!owner) return null;
+  return db.prepare("SELECT email, sleep_start_hour, sleep_end_hour FROM users WHERE email=?").get(owner.account);
+}
 function listKeysByToken(t) {
   return db.prepare("SELECT token, label, created, scope, last_used_at, last_ip FROM user_keys WHERE email=(SELECT email FROM user_keys WHERE token=?)").all(String(t));
 }
@@ -481,23 +486,53 @@ function nodeLastSeenMin(n) {
   if (!last) return null;
   return Math.round((Date.now() - last) / 60000);
 }
-// ---- User dispatch_pref：self（自己機優先，default）| fastest（唔理自己優先）| free-first（自己+free 一併優先）----
-function dispatchPrefFor(email) {
-  if (!email) return "self";
-  const r = db.prepare("SELECT dispatch_pref FROM users WHERE email=?").get(email);
-  return (r && r.dispatch_pref) || "self";
+
+// ---- Availability Check (7 filters) ----
+function nodeAvailable(n) {
+  if (!n || !n.node_id) return false;
+  if (nodeRemoved(n.node_id)) return false;      // ① Removed
+  if (nodeSuspended(n.node_id)) return false;    // ② Suspended
+  if (!nodeOnline(n)) return false;              // ③ Offline (>5min since heartbeat)
+  
+  const status = n.last_status?.status;
+  if (status === 'USER_OCCUPIED') return false;  // ④ Non-sleep time
+  if (status === 'BUSY') return false;           // ⑤ All slots busy
+  
+  return true;  // ⑥ Capabilities ⑦ Score > 0 (handled in matchCapabilities)
 }
+
+// ---- Sleep Window Calculation (unified for all nodes) ----
+function isInSleepWindow(nodeId, userEmail) {
+  const settings = nodeSetting(nodeId);
+  const user = userEmail ? db.prepare("SELECT sleep_start_hour, sleep_end_hour FROM users WHERE email=?").get(userEmail) : null;
+  
+  // Node-level override > User default
+  const start = settings.sleep_start_hour ?? user?.sleep_start_hour ?? 23;
+  const end = settings.sleep_end_hour ?? user?.sleep_end_hour ?? 7;
+  
+  // X→X or 0→24 = 24/7
+  if (start === end || (start === 0 && end === 24)) {
+    return true;
+  }
+  
+  // Calculate window
+  const hour = new Date().getHours();
+  if (start < end) {
+    return hour >= start && hour < end;  // Normal range (e.g., 9-17)
+  } else {
+    return hour >= start || hour < end;   // Wrap around (e.g., 23-7)
+  }
+}
+
 // 自己 account 嘅機（註冊咗嘅 active node）
 function myNodes(account) {
   return [...registry.values()].filter(n => n.account === account && nodeOnline(n));
 }
 
 function matchCapabilities(required, candidates, reqAcc) {
-  const pref = dispatchPrefFor(reqAcc);
   return candidates
     .filter(n => Array.isArray(n.capabilities))
-    .filter(n => n.node_id ? !nodeSuspended(n.node_id) : true)   // suspend 唔接工
-    .filter(n => nodeOnline(n))                                    // 離線唔派工
+    .filter(n => nodeAvailable(n))  // ← Use new unified filter (7 checks)
     .map(n => {
       const base = jaccard(required, n.capabilities);
       const ov = nodeShareOverride(n.node_id);
@@ -505,9 +540,7 @@ function matchCapabilities(required, candidates, reqAcc) {
       // rating 乘入派工優先（0.75–1.25x）；高分行食多單
       const rating = computeRating(n).score;
       const rMult = 0.75 + (rating / 100) * 0.5;
-      // 自己機優先：self / free-first 加權 1.5x
-      const ownMult = (reqAcc && n.account === reqAcc && pref !== "fastest") ? 1.5 : 1.0;
-      return { node: n, score: base * (ratio / 100) * rMult * ownMult };   // ratio 低 → 派工優先度低（防蜂擁）
+      return { node: n, score: base * (ratio / 100) * rMult };
     })
     .filter(x => x.score > 0)
     .sort((a, b) => b.score - a.score);
@@ -548,7 +581,7 @@ app.post("/register", (req, res) => {
 // protocol v0.2: node_status heartbeat (+ Proof-of-Uptime accumulation)
 // IDLE_SHARING 時間差 → 按 node.speed 產能 mint（tokens → SWAI）歸入 node.account
 app.post("/status", (req, res) => {
-  const { node_id, status, vram_used_gb, model_loaded, load, sleeping, ts } = req.body || {};
+  const { node_id, slots_total, slots_idle, slots_processing, vram_used_gb, model_loaded, load, ts } = req.body || {};
   let n = registry.get(node_id);
   const tk = req.get("x-swarm-token");
   const acc = accountForToken(tk) || SYSTEM_ACCOUNT;
@@ -563,42 +596,45 @@ app.post("/status", (req, res) => {
     n = { node_id, uptime_s: 0, last_status: null, capabilities: req.body.capabilities || [], url: "" };
     n.account = acc;
     // 跟心跳帶嘅 pull（平台 push worker 帶 false；外部 --pull worker 帶 true）。
-    // SSRF 由 dispatch 層 nodePushAddrOK 保證（只會 fetch 去 BIND hosts），確定唔會 fetch 任意 url。
-    n.pull = !!req.body.pull;
-    n.speed = req.body.speed || "";
-    n.gpu = req.body.gpu || "";
-    n.vram = req.body.vram || 0;
-    n.model = req.body.model || "";
-    n.max_context = req.body.max_context || 0;
-    n.share_ratio = Math.max(0, Math.min(100, Number(req.body.share_ratio !== undefined ? req.body.share_ratio : 100)));
-    n.free = !!req.body.free;
+    // P2 SSRF 修復：外部 user 註冊嘅 node 一律強制 pull（唔可以指定 url 令 router fetch 內網）
+    n.pull = !!req.body.pull || (tk !== NET_TOKEN);
     registry.set(node_id, n);
+    console.log(`[status→reg] ${node_id} (${acc}), pull=${n.pull}`);
   }
-  // 心跳帶咗最新 hardware 資料 → 更新（唔淨 auto-register）
   if (n) {
-    if (req.body.gpu) n.gpu = req.body.gpu;
-    if (req.body.vram) n.vram = req.body.vram;
+    const tsS = Math.floor(parseFloat(ts) || (Date.now() / 1000));
+    if (req.body.capabilities) n.capabilities = req.body.capabilities;
     if (req.body.model) n.model = req.body.model;
-    if (req.body.speed) n.speed = req.body.speed;
-    if (req.body.url) n.url = req.body.url;
-    if (req.body.completion && req.body.completion !== n.completion) {
-      n.completion = req.body.completion;
-      probeAbilities(req.body.completion).then(a => { n.abilities = a; if (a.ctx) n.max_context = a.ctx; }).catch(() => {});
-    }
+    if (req.body.gpu) n.gpu = req.body.gpu;
     if (req.body.max_context) n.max_context = req.body.max_context;
-    if (req.body.free !== undefined && !n.free_manual) n.free = !!req.body.free;
-    if (nodeSettingFree(node_id)) { n.free = true; n.free_manual = true; }
-    if (Array.isArray(req.body.capabilities) && req.body.capabilities.length) n.capabilities = req.body.capabilities;
+    if (req.body.speed) n.speed = req.body.speed;
+    if (req.body.share_ratio !== undefined) n.share_ratio = req.body.share_ratio;
+    if (req.body.url) n.url = req.body.url;
+    if (req.body.free !== undefined) n.free = !!req.body.free;
+    if (req.body.abilities) n.abilities = req.body.abilities;
+    if (req.body.vram_used_gb) n.vram_used_gb = req.body.vram_used_gb;
+    
+    // ✅ Calculate status based on sleep window + slots
+    const user = findUserByNode(node_id);
+    const inSleepWindow = isInSleepWindow(node_id, user?.email);
+    
+    let calculatedStatus;
+    if (!inSleepWindow) {
+      calculatedStatus = "USER_OCCUPIED";  // Non-sleep time
+    } else if (slots_idle > 0) {
+      calculatedStatus = "IDLE_SHARING";   // Sleep + idle slots
+    } else {
+      calculatedStatus = "BUSY";            // Sleep + all slots busy
+    }
+    
     const nowMs = Date.now();
-    const tsS = (ts && ts < 1e12) ? Number(ts) : (nowMs / 1000);
     const last = n.last_status;
-    if (last && last.__state === "IDLE_SHARING") { n.uptime_s += (nowMs - last.__tsMs) / 1000; }
-    if (last && last.__state === "IDLE_SHARING" && status === "IDLE_SHARING") {
-      // 連續 idle：呢段時間差 idle 產能 → mint（tok/s × sec → tokens）
+    
+    // idle mint: 連續 idle 產生 mint
+    if (calculatedStatus === "IDLE_SHARING" && last && last.__state === "IDLE_SHARING") {
       const dtSec = (nowMs - last.__tsMs) / 1000;
       const spd = parseFloat(n.speed) || 0;
       if (dtSec > 5 && spd > 0) {
-        const acc = n.account || accountForToken(req.get("x-swarm-token")) || SYSTEM_ACCOUNT;
         const ov = nodeShareOverride(node_id);
         const ratio = Math.max(0, Math.min(100, ov !== null ? ov : (n.share_ratio !== undefined ? n.share_ratio : 100)));
         const tokens = Math.round(spd * dtSec * (ratio / 100));
@@ -609,9 +645,22 @@ app.post("/status", (req, res) => {
         }
       }
     }
-    n.last_status = { status, vram_used_gb, model_loaded, load, sleeping, ts: tsS, __state: status, __tsMs: nowMs };
+    
+    n.last_status = { 
+      status: calculatedStatus, 
+      slots_total, 
+      slots_idle, 
+      slots_processing,
+      vram_used_gb, 
+      model_loaded, 
+      load, 
+      ts: tsS, 
+      __state: calculatedStatus, 
+      __tsMs: nowMs 
+    };
+    n.last_seen = tsS;  // ✅ Update last_seen timestamp
   }
-  res.json({ ok: !!n, node_id });
+  res.json({ ok: !!n, node_id, status: n?.last_status?.status });
 });
 
 app.post("/beacon", async (req, res) => {
@@ -645,10 +694,59 @@ app.post("/result", (req, res) => {
   // P2 防偽：task 必須有派過俾呢個 node（assigned set）先收 result
   if (!rec || !rec.assigned || !rec.assigned.has(node_id))
     return res.status(403).json({ ok: false, error: "task 未指派俾呢個 node" });
-  rec.list.push({ node_id, votes: votes || [], duration_ms: duration_ms || 0, tokens_in: tokens_in || 0, tokens_out: tokens_out || 0, images: images || [], units: units || 0 });
+  rec.list.push({ node_id, votes: votes || [], duration_ms: duration_ms || 0, tokens_in: tokens_in || 0, tokens_out: tokens_out || 0, images: images || [], units: units || 0, ts: Date.now() });
+  
+  // ✅ Rating vote: 收齊 3 個 responses → 比較 quality → update ratings
+  if (rec.is_rating_vote && rec.vote_candidates && rec.list.length >= rec.vote_candidates.length) {
+    try {
+      const results = rec.list.slice(-rec.vote_candidates.length);  // 最新 N 個
+      const avgDuration = results.reduce((sum, r) => sum + (r.duration_ms || 0), 0) / results.length;
+      const avgLength = results.reduce((sum, r) => sum + (r.votes[0]?.text?.length || 0), 0) / results.length;
+      
+      // Select winner: longest response (better quality proxy)
+      const winner = results.reduce((best, r) => {
+        const len = r.votes[0]?.text?.length || 0;
+        return len > (best.votes[0]?.text?.length || 0) ? r : best;
+      }, results[0]);
+      
+      // Update ratings
+      results.forEach(r => {
+        const isWinner = (r.node_id === winner.node_id);
+        const isFast = (r.duration_ms < avgDuration);
+        updateRating(r.node_id, { win: isWinner, fast: isFast });
+      });
+      
+      console.log(`[rating] Vote complete: winner=${winner.node_id}, avg_dur=${avgDuration.toFixed(0)}ms, avg_len=${avgLength.toFixed(0)}`);
+    } catch (e) {
+      console.error(`[rating] Vote processing failed:`, e);
+    }
+  }
+  
   resultsStore.set(task_id, rec);
   res.json({ ok: true, task_id, results: rec.list.length });
 });
+
+// ---- Rating Update Function ----
+function updateRating(nodeId, outcome) {
+  const node = registry.get(nodeId);
+  if (!node) return;
+  
+  // Init rating data
+  if (!node.rating_data) {
+    node.rating_data = { wins: 0, total_votes: 0, fast_count: 0 };
+  }
+  
+  node.rating_data.total_votes += 1;
+  if (outcome.win) node.rating_data.wins += 1;
+  if (outcome.fast) node.rating_data.fast_count += 1;
+  
+  // Compute rating (0-100): 70% win rate + 30% fast rate
+  const winRate = node.rating_data.wins / node.rating_data.total_votes;
+  const fastRate = node.rating_data.fast_count / node.rating_data.total_votes;
+  node.rating = Math.round((winRate * 0.7 + fastRate * 0.3) * 100);
+  
+  console.log(`[rating] ${nodeId}: ${node.rating}/100 (${node.rating_data.wins}/${node.rating_data.total_votes} wins, ${node.rating_data.fast_count} fast)`);
+}
 
 app.post("/vote", async (req, res) => {
   // aggregate task_results into weighted majority vote (reads stored /result entries)
@@ -1040,26 +1138,45 @@ app.post("/v1/chat/completions", async (req, res) => {
       candidates = [...registry.values()].filter(n => n.account); // fallback 平價
       console.log(`[v1] fallback all-candidates=${candidates.map(c=>c.node_id).join(",")}`);
     }
-    // 排序：score（含 rating/grade × share_ratio ＋ 自己機優先加分）為主，speed 只做 tiebreak
+    // 排序：score（含 rating/grade × share_ratio）為主，speed 只做 tiebreak
     const reqAcc = reqTok ? accountForToken(reqTok) : null;
     const sorted = matchCapabilities(mm.cap, candidates, reqAcc).sort((a,b) =>
       b.score - a.score || (parseFloat(b.node.speed)||0) - (parseFloat(a.node.speed)||0));
     console.log(`[v1] sorted=${sorted.map(s=>s.node.node_id+":"+s.score.toFixed(2)).join(",")}`);
-    // tool request 唔適合投票聚合（每個 node 會各自回唔同 tool call）→ 只派單一最佳 node
+    
+    // ✅ Dispatch by model strategy (no user dispatch_pref needed)
     const nTargets = useTool ? 1 : Math.max(1, mm.n_votes);
-    let targets = sorted.slice(0, nTargets).map(x => x.node);
-    // 自己機優先：pref != fastest 且有自己機 → 只派自己機
-    const _pref = dispatchPrefFor(reqAcc);
-    if (reqAcc && _pref === "free-first") {
-      const fl = sorted.map(s => s.node).filter(t => t.account === reqAcc || t.free).slice(0, nTargets);
-      if (fl.length) targets = fl;
-    } else if (reqAcc && _pref !== "fastest") {
-      const own = sorted.map(s => s.node).filter(t => t.account === reqAcc).slice(0, nTargets);
-      if (own.length) targets = own;
+    let target = null;
+    
+    if (mm.strategy === "fastest") {
+      // swarmai-fast: 揀最快（唔理 self/paid/free）
+      const bySpeed = [...sorted].sort((a, b) => (parseFloat(b.node.speed)||0) - (parseFloat(a.node.speed)||0));
+      target = bySpeed[0]?.node;
+      console.log(`[v1] strategy=fastest → ${target?.node_id} (${target?.speed} t/s)`);
+      
+    } else if (mm.strategy === "self-first") {
+      // swarmai-normal: self 優先，冇就按 score
+      const selfNode = sorted.find(s => s.node.account === reqAcc);
+      target = selfNode ? selfNode.node : sorted[0]?.node;
+      console.log(`[v1] strategy=self-first → ${target?.node_id} (self=${!!selfNode})`);
+      
+    } else if (mm.strategy === "self-then-free") {
+      // swarmai-free: self 優先，冇就 free（已經全部 free）
+      const selfNode = sorted.find(s => s.node.account === reqAcc);
+      target = selfNode ? selfNode.node : sorted[0]?.node;
+      console.log(`[v1] strategy=self-then-free → ${target?.node_id} (self=${!!selfNode})`);
+      
+    } else {
+      // fallback: 按 score
+      target = sorted[0]?.node;
+      console.log(`[v1] strategy=default → ${target?.node_id}`);
     }
-    if (!targets.length) {
+    
+    if (!target) {
       return res.status(503).json({ error: { message: "no available worker" }, type: "server_error" });
     }
+    
+    let targets = [target];  // Single dispatch (n_votes=1)
     // 收費決定：
     //  - 全部自己機 → self（唔 burn）
     //  - 有 free node 參與（或 freeOnly model）→ free（唔 burn）
@@ -1117,7 +1234,30 @@ app.post("/v1/chat/completions", async (req, res) => {
       if (Array.isArray(tools) && tools.length) payload.tools = tools;
       if (tool_choice) payload.tool_choice = tool_choice;
     }
-    resultsStore.set(task_id, { ts: Date.now(), list: [], est_fee: estFee, est_tokens_in: Math.round((prompt.length || 1000)/3.5), est_tokens_out: max_tokens, assigned: new Set(targets.map(t=>t.node_id)) });
+    // ✅ Rating vote: 1% 機會做 multi-dispatch for quality comparison
+    let isRatingVote = false;
+    let voteCandidates = [];
+    if (mm.votable && !useTool && Math.random() < 0.01) {
+      // 1% 機會：派去 3 個同 tier nodes 做 rating vote
+      const tier3 = sorted.slice(0, Math.min(3, sorted.length)).map(s => s.node);
+      if (tier3.length >= 2) {  // 至少 2 個先有意義
+        targets = tier3;
+        isRatingVote = true;
+        voteCandidates = tier3.map(t => t.node_id);
+        console.log(`[v1] 🎲 RATING VOTE (1%) → ${voteCandidates.join(",")}`);
+      }
+    }
+    
+    resultsStore.set(task_id, { 
+      ts: Date.now(), 
+      list: [], 
+      est_fee: estFee, 
+      est_tokens_in: Math.round((prompt.length || 1000)/3.5), 
+      est_tokens_out: max_tokens, 
+      assigned: new Set(targets.map(t=>t.node_id)),
+      is_rating_vote: isRatingVote,
+      vote_candidates: voteCandidates
+    });
     const p = [];
     console.log(`[v1] targets=${targets.map(t=>t.node_id).join(",")} n_votes=${nTargets} tool=${useTool}`);
     for (const node of targets) {

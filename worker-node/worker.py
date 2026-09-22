@@ -37,6 +37,52 @@ def _chat_base(completion_url):
     return url
 
 
+def get_slots_metrics(completion_url):
+    """Query llama-server /slots for real-time availability"""
+    try:
+        slots_url = completion_url.replace('/completion', '/slots')
+        r = requests.get(slots_url, timeout=5)
+        r.raise_for_status()
+        slots = r.json()
+        
+        return {
+            'total': len(slots),
+            'idle': sum(1 for s in slots if not s.get('is_processing', False)),
+            'processing': sum(1 for s in slots if s.get('is_processing', False))
+        }
+    except Exception as e:
+        print(f"[worker] slots query fail: {e}", file=sys.stderr)
+        # Fallback: assume available
+        return {'total': 1, 'idle': 1, 'processing': 0}
+
+
+def check_completion_health(completion_url, timeout=5):
+    """Check if completion endpoint is reachable and working"""
+    try:
+        # Try /health first (fast)
+        health_url = completion_url.replace('/completion', '/health')
+        r = requests.get(health_url, timeout=timeout)
+        if r.status_code == 200:
+            return True
+    except:
+        pass
+    
+    # Fallback: try minimal completion request
+    try:
+        r = requests.post(completion_url, json={
+            "prompt": "test",
+            "n_predict": 1,
+            "temperature": 0
+        }, timeout=timeout)
+        if r.status_code == 200:
+            return True
+    except Exception as e:
+        print(f"[worker] completion health check FAIL: {e}", file=sys.stderr)
+        return False
+    
+    return False
+
+
 def llm_complete(completion_url, prompt, n_predict=512, temperature=0.6, image_data=None, max_tokens=None, stop=None):
     body = {
         "prompt": f"{prompt}\n\nASSISTANT:",
@@ -150,6 +196,11 @@ class Worker:
         }
 
     def register(self, retries=3, delay=2):
+        # ✅ Health check before register
+        if not check_completion_health(self.args.completion, timeout=8):
+            print(f"[worker] ❌ completion endpoint unhealthy, SKIP register: {self.args.completion}", file=sys.stderr)
+            return False
+        
         for i in range(retries):
             try:
                 r = requests.post(self.args.router.rstrip("/") + "/register", json=self.info,
@@ -158,7 +209,7 @@ class Worker:
                 if not j.get("ok"):
                     print(f"[worker] register rejected: {j.get('error')}", file=sys.stderr)
                     return False
-                print(f"[worker] registered {self.args.node_id} -> {self.args.router} ({j.get('nodes')} nodes)")
+                print(f"[worker] ✅ registered {self.args.node_id} -> {self.args.router} ({j.get('nodes')} nodes)")
                 return True
             except Exception as e:
                 print(f"[worker] register attempt {i+1}/{retries} FAIL: {e}", file=sys.stderr)
@@ -283,21 +334,36 @@ class Worker:
 
     def heartbeat_once(self, sleeping=False):
         try:
+            # ✅ Health check completion endpoint
+            if not check_completion_health(self.args.completion, timeout=5):
+                print(f"[worker] ❌ completion unhealthy, report suspended", file=sys.stderr)
+                # Report as suspended to router
+                requests.post(self.args.router.rstrip("/") + "/status", json={
+                    "type": "node_status", "node_id": self.args.node_id,
+                    "suspended": True,
+                    "ts": int(time.time()),
+                }, headers=_headers(self.args), timeout=10)
+                return
+            
+            # ✅ Get real-time slots metrics
+            slots = get_slots_metrics(self.args.completion)
+            
             r = requests.post(self.args.router.rstrip("/") + "/status", json={
                 "type": "node_status", "node_id": self.args.node_id,
-                "status": "IDLE_SHARING" if sleeping else "USER_OCCUPIED",
+                "slots_total": slots['total'],
+                "slots_idle": slots['idle'],
+                "slots_processing": slots['processing'],
                 "vram_used_gb": self.args.vram, "model_loaded": self.args.model,
-                "sleeping": sleeping, "ts": int(time.time()),
+                "ts": int(time.time()),
                 "share_ratio": getattr(self.args, "share_ratio", 100),
                 # 帶返完整資料，令 router 心跳 auto-register 唔會變冇 gpu/vram 嘅空 node
                 "gpu": self.args.gpu, "vram": self.args.vram, "model": self.args.model,
                 "speed": getattr(self.args, "speed", ""),
                 "capabilities": self.args.capabilities,
                 "url": self.info.get("url", ""),
-                "completion": self.args.completion,
-                "pull": self.args.pull,
-                "max_context": self.args.max_context,
                 "free": bool(getattr(self.args, "free", False)),
+                "max_context": self.args.max_context,
+                "pull": self.args.pull,
             }, headers=_headers(self.args), timeout=10)
             # router 重啟後（registry 空 / 未註冊）→ 自動補完整 /register
             if r.status_code in (401, 404) or r.json().get("ok") is False:
