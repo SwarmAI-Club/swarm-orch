@@ -89,6 +89,16 @@ mint = (idle_min × 2 SWAI/min  [Base 底薪, 同級]
 費率：1 SWAI = 10K tokens；in 5000t / out 1000t（output 貴 5x）
 歸戶：credits key = account(email)；5 node 全入同一 email
 ```
+### 4.2b swarmai-orch — OpenAI 兼容長任務協作（2026-09-23 實作）
+```
+/v1/chat/completions (model=swarmai-orch) + prompt 超出網絡最細 node ctx
+→ router 本地拆解 (decomposePrompt, 零 LLM call, 自然邊界)
+→ round-robin 派唔同 node (client→free→paid 順序, maxChars≈16K, maxChunks=8)
+→ 收齊/超時後由 1 個 node 綜合 (finalize) 出最終答案
+→ SSE stream：swarm_progress stage = decompose→dispatch→working(1/k..k/k)→finalize→done + partial content
+設計決定：派工由用戶揀嘅 model 控制 (MODEL_MAP strategy)——唔做 multi-node voting (嘥人 GPU/token)
+```
+### 4.3 經濟 v3
 ### 4.4 監察
 ```
 swarm_monitor.py：nodes≥5 + backend /props ctx≥65536 + /health

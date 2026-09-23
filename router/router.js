@@ -604,8 +604,10 @@ app.post("/status", (req, res) => {
     n = { node_id, uptime_s: 0, last_status: null, capabilities: req.body.capabilities || [], url: "" };
     n.account = acc;
     // 跟心跳帶嘅 pull（平台 push worker 帶 false；外部 --pull worker 帶 true）。
-    // P2 SSRF 修復：外部 user 註冊嘅 node 一律強制 pull（唔可以指定 url 令 router fetch 內網）
-    n.pull = !!req.body.pull || (tk !== NET_TOKEN);
+    // P2 SSRF 修復：非 owner 嘅外部 node 一律強制 pull（唔可以指定 url 令 router fetch 內網）。
+    // 但 owner 自己嘅 push-mode worker（LAN listen + no --pull）→ 保留 req.body.pull（=false，push 直達）。
+    // 真正 SSRF 防線喺 dispatch 度 nodePushAddrOK()：router 只會 push 去 BIND hosts，非 BIND 照 inbox。
+    n.pull = (own && own.account === acc) ? !!req.body.pull : true;
     registry.set(node_id, n);
     console.log(`[status→reg] ${node_id} (${acc}), pull=${n.pull}`);
   }
@@ -1180,11 +1182,12 @@ async function handleOrchestration(req, res, opts) {
   const preferred = [...clientNodes, ...freeNodes, ...paidNodes];
   if (!preferred.length) return res.status(503).json({ error: { message: "no available worker" }, type: "server_error" });
 
-  // chunk budget：用會用到嘅 node（client 優先）低 ctx，留 20% margin
-  const useSet = preferred.slice(0, Math.min(preferred.length, 5));
+  // chunk budget：細chunk 每 node 處理快（~16k chars ≈ 4-5k tokens），cap 8。
+  // 大 prompt 行 round-robin，細 node 唔使食太大 chunk → 唔會拖爆 latency。
+  const useSet = preferred.slice(0, Math.min(preferred.length, 8));
   const ctxLow = Math.min(...useSet.map(s => (s.node.max_context) || minCtx));
-  const maxChars = Math.floor(ctxLow * 0.8 * 3.5);
-  const { chunks, k } = decomposePrompt(prompt, maxChars, Number(process.env.SWARM_ORCH_MAX_CHUNKS || 5));
+  const maxChars = Math.min(Math.floor(ctxLow * 0.8 * 3.5), Number(process.env.SWARM_ORCH_CHUNK_MAX || 16000));
+  const { chunks, k } = decomposePrompt(prompt, maxChars, Number(process.env.SWARM_ORCH_MAX_CHUNKS || 8));
 
   // 攞齊結果 helper（每個 sub-task 獨立 store，收齊先返）
   const dispatchPayload = (t, node, extra) => {
@@ -1267,8 +1270,8 @@ async function handleOrchestration(req, res, opts) {
   const gotNode = new Array(k).fill(null);
   const waitStart = Date.now();
   for (let i = 0; i < k; i++) {
-    // 剩餘時間分配：每個 sub-task 預留 30s，總體 90s 封頂
-    const budget = Math.max(8000, Math.min(60000, 90000 - (Date.now() - waitStart)));
+    // 剩餘時間分配：每個 sub-task 預留 45s，總體 180s 封頂（大長文要時間）
+    const budget = Math.max(12000, Math.min(45000, 180000 - (Date.now() - waitStart)));
     const rec = await waitResult(subTasks[i].subId, budget);
     if (rec?.list?.length) {
       const nodeResult = rec.list[rec.list.length - 1];
@@ -1298,7 +1301,7 @@ async function handleOrchestration(req, res, opts) {
   const finPayload = { task_id: finId, beacon_id: crypto.randomUUID(), prompt: finalizePrompt, n_votes: 1, temperature: Math.min(0.6, temperature + 0.1), max_tokens, stop: stop || undefined };
   resultsStore.set(finId, { ts: Date.now(), list: [], est_fee: 0, est_tokens_in: Math.round(finalizePrompt.length / 3.5), est_tokens_out: max_tokens, assigned: new Set([finNode.node_id]) });
   try { await dispatchPayload(finPayload, finNode, {}); } catch (e) { console.log(`[orch] finalize dispatch fail ${finNode.node_id}: ${e.message}`); }
-  const finRec = await waitResult(finId, 60000);
+  const finRec = await waitResult(finId, 90000);
   const finVotes = (finRec?.list || []).flatMap(r => r.votes || []);
   const finalContent = finVotes.map(v => String(v.content || "")).filter(Boolean).join("\n") || partials.filter(Boolean).join("\n");
   const allNodes = [...gotNode.filter(Boolean), finNode.node_id];

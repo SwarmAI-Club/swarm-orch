@@ -50,6 +50,7 @@ SwarmAI 提供 OpenAI 兼容端點 — 直接 replace 任何 OpenAI client 嘅 b
   - `swarmai-normal` — 派去 B/C tier 平機，收費平（×1.0/×0.6）
   - `swarmai-image` — 圖像生成（SD-WebUI/ComfyUI adaptive worker），每張 ~20 SWAI
   - `swarmai-video` — 視訊生成（Wan adapter），每條 ~80 SWAI
+  - `swarmai-orch` — 長任務協作（2026-09-23 新增）：prompt 超出網絡最細 node ctx → router 自動拆解派多個 node → 綜合出最終答案（OpenAI 兼容，支援 stream）
   - vision 自動分流：messages 含 base64 `image_url` → 自動用 qwen2.5-vl
 - **收費**: 按 tokens（in 5000t/SWAI、out 1000t/SWAI × tier 倍率）；balance 唔夠 → 自動 fallback 自己機+free machine（Profile 有派工狀態）；連 fallback 都冇先 402
 
@@ -101,6 +102,17 @@ r = client.chat.completions.create(
             "notice":"SWAI 唔夠 → 已自動落返自己機 + free machine（免費）"}}
 ```
 > `swarmai.mode=fallback` 代表 token 唔夠自動用緊自己機（唔扣）；想用出面機就登入 portal 充值（USDC，1:100）。
+
+### swarmai-orch（長任務協作）
+- 即刻用：`{"model":"swarmai-orch","messages":[...],"max_tokens":...}`（prompt 長到超出網絡最細 node ctx 先會觸發拆解；短 prompt 照樣單 node 即答）。
+- 觸發後回覆多一個 field：
+```json
+"swarmai":{"stages":["decompose","dispatch","working","finalize"],   // 已執行階段
+          "nodes":[...], "mode":"self", "orchestrated":true}
+```
+- `stream:true` 嗰陣：除咗正常 content deltas，中間會出 `swarm_progress` SSE events（`{"stage":"decompose|dispatch|working|finalize","total":k,"done":n}`），等 client 見到拆幾多份/收返幾份。
+- 拆解唔另收費（router 本地，零 LLM call）；派工主要行 `self/free`（自己機+free node 免費），淨係 fallback 到 paid node 先會扣 token。
+- 限制：最多拆 8 份（`SWARM_ORCH_MAX_CHUNKS`）、每份 ≤ ~16k chars（`SWARM_ORCH_CHUNK_MAX`）；唔支持 tools/vision 輸入。
 
 ## 自己 node 點玩法（2026-09-19）
 
