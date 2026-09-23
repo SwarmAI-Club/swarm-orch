@@ -530,6 +530,13 @@ function myNodes(account) {
   return [...registry.values()].filter(n => n.account === account && nodeOnline(n));
 }
 
+// ---- User dispatch_pref：self（自己機優先，default）| fastest（唔理自己優先）| free-first（自己+free 一併優先）----
+function dispatchPrefFor(email) {
+  if (!email) return "self";
+  const r = db.prepare("SELECT dispatch_pref FROM users WHERE email=?").get(email);
+  return (r && r.dispatch_pref) || "self";
+}
+
 function matchCapabilities(required, candidates, reqAcc) {
   return candidates
     .filter(n => Array.isArray(n.capabilities))
