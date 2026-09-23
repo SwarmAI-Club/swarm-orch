@@ -8,6 +8,8 @@ const CONFIG = process.env.SWARM_CONFIG || path.join(__dirname, "..", "config", 
 const PORT = process.env.SWARM_ROUTER_PORT || 4900;
 const CREDIT_RATE_PM = Number(process.env.SWARM_CREDIT_RATE_PM || 10); // legacy SWAI per GPU-min (vote) — replaced by token-based
 const UPTIME_RATE_PM = Number(process.env.SWARM_UPTIME_RATE_PM || 2);  // legacy SWAI per idle min — replaced by token-based
+const MAX_SPEED_TOK_S = Number(process.env.SWARM_MAX_SPEED || 100);      // 安全審計 H1：node 自報 speed 封頂（防假 node 無限 mint）
+const MAX_IDLE_MINT_PM = Number(process.env.SWARM_MAX_IDLE_MINT_PM || 20); // 每 node 每分鐘 idle mint SWAI 上限（經濟防護）
 const NET_TOKEN = process.env.SWARM_API_TOKEN || "dev-insecure-token"; // REQUIRED, all endpoints check it
 // ---- SWAI economy v2 (tokens-based) ----
 const SWAI_TOKENS = Number(process.env.SWAI_TOKENS || 10000);      // 1 SWAI = N tokens (input/output 基底)
@@ -177,6 +179,8 @@ function nodeTier(n) {
 async function probeAbilities(completionUrl) {
   try {
     const u = new URL(completionUrl);
+    // 安全審計 H3：probe 只准 probe 平台 BIND hosts + tailnet CGNAT + loopback（防 SSRF 打 169.254 metadata / LAN / docker）
+    if (!probeAddrOK(completionUrl)) return { tools: null, thinking: null, vision: null, ctx: 0, error: "blocked non-bind probe" };
     const props = u.protocol === "http:" ? `http://${u.host}/props` : `https://${u.host}/props`;
     const r = await fetch(props, { signal: AbortSignal.timeout(6000) });
     const d = await r.json();
@@ -427,6 +431,13 @@ function claimNode(node_id, account, force = false) {
   return nodeOwner(node_id);
 }
 function userByEmail(e) { return db.prepare("SELECT * FROM users WHERE email=?").get(String(e).toLowerCase()); }
+function validateEmail(e) {
+  const s = String(e || "").trim().toLowerCase();
+  if (s.length > 254) return null;
+  if (!/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(s)) return null;
+  if (/["'`$;(){}|&<>]/.test(s)) return null;   // shell/metachar 一律唔准
+  return s;
+}
 
 const nodes = require(CONFIG);
 
@@ -574,7 +585,9 @@ app.post("/register", (req, res) => {
   const n = registry.get(node_id) || { uptime_s: 0, last_status: null };
   // 重新註冊 = 重裝/換機後再上線 → 清 removed 標記
   db.prepare("UPDATE node_settings SET removed=0 WHERE node_id=?").run(node_id);
-  Object.assign(n, { node_id, capabilities, model, gpu, max_context, speed, url, pull: forcePull ? true : !!req.body.pull });
+  // 安全審計 H1：speed 封頂（自報數唔可信）
+  const spdBound = Math.max(1, Math.min(MAX_SPEED_TOK_S, Number(speed) || 1));
+  Object.assign(n, { node_id, capabilities, model, gpu, max_context, speed: spdBound, url, pull: forcePull ? true : !!req.body.pull });
   const so = nodeShareOverride(node_id);
   n.share_ratio = Math.max(0, Math.min(100, so !== null ? so : (share_ratio !== undefined ? share_ratio : (n.share_ratio || 100))));
   // free：DB owner 設定優先（持久）；無則用 register flag
@@ -620,10 +633,11 @@ app.post("/status", (req, res) => {
     if (req.body.model) n.model = req.body.model;
     if (req.body.gpu) n.gpu = req.body.gpu;
     if (req.body.max_context) n.max_context = req.body.max_context;
-    if (req.body.speed) n.speed = req.body.speed;
+    if (req.body.speed) n.speed = Math.max(1, Math.min(MAX_SPEED_TOK_S, Number(req.body.speed) || 1));
     if (req.body.share_ratio !== undefined) n.share_ratio = req.body.share_ratio;
     if (req.body.url) n.url = req.body.url;
-    if (req.body.free !== undefined) n.free = !!req.body.free;
+    // 安全審計 H1：free flag 唔可以喺心跳任意覆寫（只有 DB owner 設定 / register 初次設定先算數）
+    if (req.body.free !== undefined && !nodeSettingFree(node_id) && !n.free_manual) n.free = !!req.body.free;
     if (req.body.abilities) n.abilities = req.body.abilities;
     if (req.body.vram_used_gb) n.vram_used_gb = req.body.vram_used_gb;
     
@@ -651,10 +665,17 @@ app.post("/status", (req, res) => {
         const ov = nodeShareOverride(node_id);
         const ratio = Math.max(0, Math.min(100, ov !== null ? ov : (n.share_ratio !== undefined ? n.share_ratio : 100)));
         const tokens = Math.round(spd * dtSec * (ratio / 100));
-        if (tokens > 0) {
-          const c = ledgerMint(acc, { tokensIn: 0, tokensOut: tokens, taskId: null, note: "idle_uptime", nodeId: node_id, kind: "idle" });
+        // 安全審計 H1：每 node 每分鐘 idle mint SWAI 上限（經濟防護；防超高頻心跳 / 爆 speed 濫取）
+        const mintedBefore = (n.mint_window || {}).ts && (nowMs - n.mint_window.ts) < 60000 ? (n.mint_window.swai || 0) : 0;
+        const estSwai = tokensToCredit(0, tokens);
+        const allowSwai = Math.min(estSwai, Math.max(0, MAX_IDLE_MINT_PM - mintedBefore));
+        if (tokens > 0 && allowSwai > 0) {
+          // tokens 按 cap 縮放到對應 SWAI（tokensToCredit out-RATE 1000:1）
+          const cappedTokens = allowSwai * RATE_OUT;
+          const c = ledgerMint(acc, { tokensIn: 0, tokensOut: cappedTokens, taskId: null, note: "idle_uptime", nodeId: node_id, kind: "idle" });
+          n.mint_window = { ts: nowMs, swai: mintedBefore + c };
           n.last_mint_idle = { ts: nowMs, tokens, credit: c };
-          console.log(`[idle] ${node_id} +${c} SWAI (${tokens} tokens, ${dtSec.toFixed(0)}s idle, ratio ${ratio}%)`);
+          console.log(`[idle] ${node_id} +${c} SWAI (tokens ${tokens} cap→${MAX_IDLE_MINT_PM}/min SWAI)`);
         }
       }
     }
@@ -894,8 +915,12 @@ app.post("/v1/pay/verify", async (req, res) => {
 });
 
 app.get("/credits/:account", (req, res) => {
-  const acc = req.params.account;
-  // 全部屬於呢個 account 嘅 node + 各自 ratio/speed（查詢時明列計法）
+  const t = req.swarmToken || req.get("x-swarm-token");
+  // 安全審計 M1：只能睇自己 account（admin 先可以查所有人）
+  const me = findUserByToken(t);
+  const acc = String(req.params.account || "").toLowerCase();
+  if (t !== NET_TOKEN && (!me || me.email.toLowerCase() !== acc))
+    return res.status(403).json({ ok: false, error: "只能查自己嘅 account" });
   const nodes = [...registry.values()].filter(n => n.account === acc).map(n => ({
     node_id: n.node_id, speed: parseFloat(n.speed) || 0, share_ratio: Math.max(0, Math.min(100, Number(n.share_ratio !== undefined ? n.share_ratio : 100))), speed_effective: (parseFloat(n.speed) || 0) * (Math.max(0, Math.min(100, Number(n.share_ratio !== undefined ? n.share_ratio : 100))) / 100),
   }));
@@ -907,12 +932,25 @@ app.get("/credits/:account", (req, res) => {
 });
 
 app.get("/ledger/latest", (req, res) => {
+  const t = req.swarmToken || req.get("x-swarm-token");
+  if (t !== NET_TOKEN) return res.status(403).json({ ok: false, error: "admin only" });
   const limit = Math.min(50, Number(req.query.limit || 20));
   const rows = db.prepare("SELECT * FROM ledger ORDER BY id DESC LIMIT ?").all(limit);
   res.json(rows);
 });
 
-app.get("/nodes", (_, res) => res.json([...registry.values()]));
+app.get("/nodes", (req, res) => {
+  const t = req.swarmToken || req.get("x-swarm-token");
+  const me = findUserByToken(t);
+  // 安全審計 M1：admin 睇全部；普通 user 只睇自己 node，且剝走內網欄位（completion/url/secret 唔出）
+  if (t === NET_TOKEN) return res.json([...registry.values()]);
+  const mine = me ? [...registry.values()].filter(n => n.account === me.email).map(n => ({
+    node_id: n.node_id, model: n.model, gpu: n.gpu, capabilities: n.capabilities, max_context: n.max_context,
+    speed: n.speed, share_ratio: n.share_ratio, free: !!n.free, tier: nodeTier(n), abilities: n.abilities || null,
+    account: n.account, pull: n.pull, last_status: n.last_status, online: nodeOnline(n), rating: computeRating(n),
+  })) : [];
+  res.json(mine);
+});
 
 // periodic: prune stale + Proof-of-Uptime settlement sweep (10 min)
 setInterval(() => {
@@ -966,6 +1004,21 @@ function nodePushAddrOK(u) {
   try {
     const host = new URL(u || "").hostname;
     return BIND.some(b => b === host);   // 127.0.0.1 / <ip>（main 自己）
+  } catch (e) { return false; }
+}
+// 安全審計 H3：probe（/props 能力探測）allowlist = loopback + tailnet CGNAT(100.64/10) + BIND
+// 咁樣遠端 worker（tailnet IP）照 probe 到，但 169.254.*（AWS/GCP metadata）、LAN、docker bridge 全部封。
+function probeAddrOK(u) {
+  try {
+    const host = new URL(u || "").hostname;
+    if (BIND.some(b => b === host)) return true;
+    if (host === "localhost" || /^(\d{1,3}\.){3}\d{1,3}$/.test(host)) {
+      const ip = host;
+      if (ip === "127.0.0.1" || ip === "::1" || ip.startsWith("127.")) return true;
+      const o = ip.split(".").map(Number);
+      if (o.length === 4 && o[0] === 100 && o[1] >= 64 && o[1] <= 127) return true;  // tailnet CGNAT
+    }
+    return false;
   } catch (e) { return false; }
 }
 
@@ -1701,7 +1754,8 @@ app.post("/portal/signup", (req, res) => {
   if (pw.length < 13) return res.status(400).json({ ok: false, error: "密碼至少 13 位" });
   if (!/[a-z]/.test(pw) || !/[A-Z]/.test(pw) || !/[0-9]/.test(pw) || !/[^A-Za-z0-9]/.test(pw))
     return res.status(400).json({ ok: false, error: "密碼要同時有大階+細階+數字+符號" });
-  const e = String(email).toLowerCase();
+  const e = validateEmail(email);
+  if (!e) return res.status(400).json({ ok: false, error: "email 格式唔啱" });
   if (userByEmail(e)) return res.status(409).json({ ok: false, error: "email already registered" });
   const token = mkToken();
   const node_id = mkNodeId(e);
@@ -1874,7 +1928,8 @@ app.post("/portal/node_enable", (req, res) => {
 });
 
 app.post("/portal/forgot", (req, res) => {
-  const email = String((req.body || {}).email || "").toLowerCase();
+  const email = validateEmail((req.body || {}).email);
+  if (!email) return res.json({ ok: true, hint: "如果帳戶存在，會收到重置連結" });
   const u = userByEmail(email);
   if (u) {
     const code = mkToken();
@@ -1884,21 +1939,20 @@ app.post("/portal/forgot", (req, res) => {
     const link = `https://swarmai.club/portal/?code=${code}`;
     if (SMTP.user && SMTP.pass) {
       try {
-        const { exec } = require("child_process");
+        const { spawnSync } = require("child_process");
         const py = [
           "import smtplib,os,sys",
           "s=smtplib.SMTP_SSL(os.environ['HOST'],os.environ['PORT'],timeout=20)",
           "s.login(os.environ['U'],os.environ['P'])",
-          `m='From: ${SMTP.user}\\nTo: '+sys.argv[1]+'\\nSubject: SwarmAI password reset\\n\\nReset your password here:\\n'+sys.argv[2]`,
+          `m='From: ${SMTP.user.replace(/['$]/g, '')}\\nTo: '+sys.argv[1]+'\\nSubject: SwarmAI password reset\\n\\nReset your password here:\\n'+sys.argv[2]`,
           "s.sendmail(os.environ['U'],[sys.argv[1]],m.encode())",
           "s.quit()",
         ].join(";");
-        exec(`python3 -c "${py}" "${email}" "${link}"`,
-          { env: { ...process.env, HOST: SMTP.host, PORT: String(SMTP.port), U: SMTP.user, P: SMTP.pass }, timeout: 25000 },
-          (err, stdout, stderr) => {
-            if (err) console.log("[forgot] SMTP send failed:", String(stderr || err.message || err).slice(0, 300));
-            else console.log("[forgot] reset link sent to", email);
-          });
+        const proc = spawnSync("python3", ["-c", py, email, link],
+          { env: { ...process.env, HOST: SMTP.host, PORT: String(SMTP.port), U: SMTP.user, P: SMTP.pass }, timeout: 25000 });
+        if (proc.error || proc.status !== 0)
+          console.log("[forgot] SMTP send failed:", String((proc.stderr || "").toString().slice(0, 300) || proc.error?.message || proc.status));
+        else console.log("[forgot] reset link sent to", email);
       } catch (e) { console.log("[forgot] smtp err:", String(e).slice(0,200)); }
     } else {
       console.log("[forgot] SMTP not configured (SMTP.user/pass missing)");
