@@ -317,6 +317,7 @@ class Worker:
             url = str(self.args.completion).rstrip("/")
         if not url:
             raise RuntimeError("image adapter 需要 SD_API_URL（例如 http://127.0.0.1:7860/sdapi/v1）")
+        n = max(1, min(int(n) or 1, 4))  # defense-in-depth：batch_size 上限 4（router 最大 clamp 4）
         w, h = (size.lower()=="512" and (512,512)) or (size.lower()=="1024" and (1024,1024)) or (768,768)
         body = {"prompt": prompt, "negative_prompt": "", "steps": 20, "width": w, "height": h, "batch_size": int(n), "cfg_scale": 7}
         r = requests.post(url + "/txt2img", json=body, timeout=300)
