@@ -191,13 +191,14 @@ class Worker:
             "share_ratio": args.share_ratio,
             "free": bool(getattr(args, "free", False)),
             "completion": args.completion,
-            "url": f"http://{args.listen}:{args.port}",
+            # 0.0.0.0 唔可以俾 router push（nodePushAddrOK 只認 BIND hosts）→ 廣告返 LAN 地址
+            "url": f"http://{args.listen}:{args.port}" if args.listen and args.listen != "0.0.0.0" else f"http://<ip>:{args.port}",
             "pull": args.pull,
         }
 
     def register(self, retries=3, delay=2):
-        # ✅ Health check before register
-        if not check_completion_health(self.args.completion, timeout=8):
+        # ✅ Health check before register（adapter 用 SD/ComfyUi 唔係 llama-completion → 唔適用，跳過）
+        if not self.args.adapter and not check_completion_health(self.args.completion, timeout=8):
             print(f"[worker] ❌ completion endpoint unhealthy, SKIP register: {self.args.completion}", file=sys.stderr)
             return False
         
@@ -334,8 +335,8 @@ class Worker:
 
     def heartbeat_once(self, sleeping=False):
         try:
-            # ✅ Health check completion endpoint
-            if not check_completion_health(self.args.completion, timeout=5):
+            # ✅ Health check completion endpoint（adapter 用 SD/ComfyUi endpoint，唔係 llama → 跳過）
+            if not self.args.adapter and not check_completion_health(self.args.completion, timeout=5):
                 print(f"[worker] ❌ completion unhealthy, report suspended", file=sys.stderr)
                 # Report as suspended to router
                 requests.post(self.args.router.rstrip("/") + "/status", json={

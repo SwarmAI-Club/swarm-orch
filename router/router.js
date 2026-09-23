@@ -505,6 +505,9 @@ function nodeAvailable(n) {
 // ---- Sleep Window Calculation (unified for all nodes) ----
 function isInSleepWindow(nodeId, userEmail) {
   const settings = nodeSetting(nodeId);
+  // 平台自身 service node（^system^ 無 user）＝SD-WebUI/ComfyUI 等 24/7 長開服務，冇睡眠窗
+  const owner = nodeOwner(nodeId);
+  if (owner && owner.account === SYSTEM_ACCOUNT) return true;
   const user = userEmail ? db.prepare("SELECT sleep_start_hour, sleep_end_hour FROM users WHERE email=?").get(userEmail) : null;
   
   // Node-level override > User default
