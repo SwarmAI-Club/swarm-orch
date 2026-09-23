@@ -148,6 +148,7 @@ const MODEL_MAP = {
   "swarmai-normal":   { cap: ["reasoning", "math"], tier: ["B", "C"], n_votes: 1, votable: true, strategy: "self-first", label: "日常平價（省錢）— 自己機優先 B/C tier" },
   "swarmai-vision": { cap: ["vision"], tier: ["S", "A", "B", "C"], n_votes: 1, votable: false, strategy: "fastest", vision: true, hidden: true, label: "Vision (auto-route)" },
   "swarmai-free":     { cap: ["reasoning", "math", "analysis"], tier: ["S", "A", "B", "C"], n_votes: 1, votable: true, strategy: "self-then-free", freeOnly: true, label: "免費節點（完全免費）— 自己機優先，then free nodes" },
+  "swarmai-orch":     { cap: ["reasoning", "math", "analysis", "code"], tier: ["S", "A", "B", "C"], n_votes: 1, votable: false, strategy: "self-first", orchestrate: true, label: "長任務拆解 + 分散派工 + 綜合（client node 優先 → free）" },
   "swarmai-image":    { cap: ["image-gen"], tier: ["A", "B", "C"], n_votes: 1, votable: false, strategy: "fastest", unit: true, unitPer: "job", unitPrice: IMAGE_UNIT_PRICE, max_units: 4, label: "圖像生成（SD/ComfyUI）" },
   "swarmai-video":    { cap: ["video-gen"], tier: ["A", "B", "C"], n_votes: 1, votable: false, strategy: "fastest", unit: true, unitPer: "job", unitPrice: VIDEO_UNIT_PRICE, max_units: 8, label: "視訊生成（Wan）" },
 };
@@ -1102,6 +1103,233 @@ function isToolRequest(messages, tools) {
   return false;
 }
 
+// ---- swarmai-orch: 長任務拆解（router 本地，零 LLM call）----
+// 喺自然邊界（段落 / bullet / 「問題N：」/ JSON top-level keys）拆到每 chunk ≤ maxChars。
+// 單一連續片段拆唔到 → 唔硬拆，回傳單一 chunk（fallback 單 node）。
+function decomposePrompt(prompt, maxChars, maxChunks = 5) {
+  maxChars = Math.max(512, maxChars);
+  if (!prompt || prompt.length <= maxChars) return { chunks: [prompt], k: 1 };
+  // 自然邊界 regex：空行段落、bullet、編號「問題N：」「Q1」、JSON keys 行尾
+  const parts = [];
+  const lines = String(prompt).split("\n");
+  let cur = "";
+  let curCtx = 0;
+  const flush = () => { if (cur.trim()) parts.push(cur.trim()); cur = ""; curCtx = 0; };
+  // bullet 起始 heuristics：行以 -/*/•/數字./問題N：/Q\d/K``` 開頭
+  const startsNew = /^\s*(?:[-*•]|(?:\d+[.、)])|(?:問題\s*\d+[:：])|Q\d+[:：]|```|(?:第[一二三四五六七八九十\d]+[章节節部分]))/;
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    if (!line.trim()) { if (cur) cur += "\n"; continue; }
+    // 單行本身已超 budget → 即時獨立做一個 part
+    if (Math.round(line.length / 3.5) > maxChars) { flush(); parts.push(line.trim()); continue; }
+    // 現有 cur 加呢行會超 budget → flush 開新 chunk
+    if (curCtx > 0 && (curCtx + Math.round(line.length / 3.5)) > maxChars) { flush(); }
+    // 自然邊界：bullet/問題開頭且當前 chunk 已夠大 → 開新 chunk
+    if (startsNew.test(line) && curCtx > 0 && curCtx > Math.round(maxChars * 0.25)) { flush(); }
+    cur = cur ? cur + "\n" + line : line;
+    curCtx = Math.round(cur.length / 3.5);
+  }
+  flush();
+  // 得 1 個 parts 且大過 budget → 強制拆（唔好單一超長）
+  if (parts.length === 1 && parts[0].length > maxChars * 2) {
+    const full = parts.shift();
+    const mid = Math.floor(full.length / 2);
+    parts.push(full.slice(0, mid));
+    parts.push(full.slice(mid));
+  }
+  // cap maxChunks：超過 → 尾段合併入最後一個 chunk
+  if (parts.length > maxChunks) {
+    const head = parts.slice(0, maxChunks - 1);
+    head.push(parts.slice(maxChunks - 1).join("\n"));
+    parts.length = 0; parts.push(...head);
+  }
+  const ok = parts.filter(Boolean);
+  return { chunks: ok, k: ok.length };
+}
+
+// SSE helper：統一寫 metadata + delta chunk（stream 用）
+function sseChunk(res, obj) {
+  try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) { /* 連線斷咗 */ }
+}
+
+// ---- swarmai-orch: 長任務拆解 → 分散派工 → 綜合 ----
+// 用戶明揀 swarmai-orch + prompt 超網絡最細 ctx → 先派 N 個 chunk 去唔同 node，
+// 收齊後由 1 個 node 綜合最終答案。派工順序：client node → free → paid。
+async function handleOrchestration(req, res, opts) {
+  const { modelKey, mm, prompt, temperature, max_tokens, stream, stop, reqAcc, reqTok, minCtx } = opts;
+  const topTier = mm.tier && mm.tier.length ? mm.tier[0] : "B";
+  const sendSSE = stream && !res.headersSent;
+
+  // 候選：符合 tier + cap、可用
+  let candidates = [...registry.values()].filter(n => n.account && (mm.tier.includes(nodeTier(n)) || n.free));
+  if (!candidates.length) candidates = [...registry.values()].filter(n => n.account);
+  const scored = matchCapabilities(mm.cap, candidates, reqAcc).sort((a, b) => b.score - a.score);
+  if (!scored.length) return res.status(503).json({ error: { message: "no available worker" }, type: "server_error" });
+
+  // 依序：client node → free → paid
+  const clientNodes = scored.filter(s => s.node.account === reqAcc);
+  const freeNodes = scored.filter(s => s.node.free);
+  const paidNodes = scored.filter(s => s.node.account !== reqAcc && !s.node.free);
+  const preferred = [...clientNodes, ...freeNodes, ...paidNodes];
+  if (!preferred.length) return res.status(503).json({ error: { message: "no available worker" }, type: "server_error" });
+
+  // chunk budget：用會用到嘅 node（client 優先）低 ctx，留 20% margin
+  const useSet = preferred.slice(0, Math.min(preferred.length, 5));
+  const ctxLow = Math.min(...useSet.map(s => (s.node.max_context) || minCtx));
+  const maxChars = Math.floor(ctxLow * 0.8 * 3.5);
+  const { chunks, k } = decomposePrompt(prompt, maxChars, Number(process.env.SWARM_ORCH_MAX_CHUNKS || 5));
+
+  // 攞齊結果 helper（每個 sub-task 獨立 store，收齊先返）
+  const dispatchPayload = (t, node, extra) => {
+    const body = { ...t, auth: signAssign(t.task_id, node.node_id) };
+    if (node.pull || !nodePushAddrOK(node.url)) { const q = inbox.get(node.node_id) || []; q.push(body); inbox.set(node.node_id, q); }
+    else return fetch(`${node.url}/assign`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(120000) });
+  };
+  const waitResult = async (task_id, timeoutMs) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const rec = resultsStore.get(task_id);
+      if (rec && rec.list && rec.list.length) return rec;
+      await new Promise(r => setTimeout(r, 400));
+    }
+    return resultsStore.get(task_id);
+  };
+
+  const emitStage = (stage, done, total, nodeId) => {
+    if (!sendSSE) return;
+    const p = { stage, total, done };
+    if (nodeId) p.result_node = nodeId;
+    sseChunk(res, { choices: [{ index: 0, delta: {}, finish_reason: null }], swarm_progress: p });
+  };
+
+  // 收費：orchestration 主打 client/free → 大多 mode=self/free（唔 burn）。
+  // 真係要用 paid node 先需要 burn balance（fallback 落返 self/free）。
+  let dispatchMode = "self";
+  const allInternal = preferred.every(s => s.node.account === reqAcc || s.node.free || !reqAcc);
+  let estFee = 0;
+  if (reqAcc && reqTok !== NET_TOKEN && !allInternal) {
+    const estIn = Math.round(prompt.length / 3.5);
+    const estOut = max_tokens * (k + 1);
+    estFee = tokensToCredit(estIn, estOut, tierCharge(topTier));
+    const fallback = preferred.filter(s => s.node.account === reqAcc || s.node.free);
+    if (creditBalance(reqAcc) < estFee || estFee > dailyQuotaRemaining(reqAcc)) {
+      if (fallback.length) { dispatchMode = "fallback"; estFee = 0; console.log(`[orch] fallback-self ${fallback.map(s=>s.node.node_id).join(",")}`); }
+      else return res.status(402).json({ error: { message: `SWAI 餘額不足 (need ${estFee})——orchestration 需要多 node，建議用夠 balance 或 +free node`, type: "insufficient_balance" } });
+    } else { ledgerBurnChecked(reqAcc, estFee, null, "orch_estimate"); dispatchMode = "paid"; }
+  } else { dispatchMode = allInternal ? "self" : "free"; }
+
+  // ---- SSE 開場 ----
+  if (sendSSE) {
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders?.();
+    emitStage("decompose", 0, k);
+  }
+
+  // 得 1 個 chunk → 唔係真拆解，照派單 node（client→free→paid）
+  if (k <= 1) {
+    const target = preferred[0].node;
+    const task_id = crypto.randomUUID();
+    const payload = { task_id, beacon_id: crypto.randomUUID(), prompt, n_votes: 1, temperature, max_tokens, stop: stop || undefined };
+    resultsStore.set(task_id, { ts: Date.now(), list: [], est_fee: estFee, est_tokens_in: Math.round(prompt.length / 3.5), est_tokens_out: max_tokens, assigned: new Set([target.node_id]) });
+    try { await dispatchPayload(payload, target, {}); } catch (e) { /* 落 inbox */ }
+    const rec = await waitResult(task_id, 30000);
+    const votes = (rec?.list || []).flatMap(r => r.votes || []);
+    const content = votes.map(v => String(v.content || "")).filter(Boolean).join("\n") || "";
+    return finishOrchestration(res, { modelKey, task_id, prompt, content, estFee, dispatchMode, nodes_used: [target.node_id], stream, stop, sseStarted: sendSSE, tin: (rec?.list || []).reduce((s, r) => s + (r.tokens_in || 0), 0), tout: (rec?.list || []).reduce((s, r) => s + (r.tokens_out || 0), 0) });
+  }
+
+  // ---- 開場 event ----
+  if (sendSSE) emitStage("dispatch", 0, k);
+
+  // ---- 1️⃣ 拆 N 個 sub-task 派去唔同 node（round-robin：client 起）----
+  const subTasks = [];
+  for (let i = 0; i < k; i++) {
+    const node = useSet[i % useSet.length].node;
+    const subId = crypto.randomUUID();
+    const payload = { task_id: subId, beacon_id: crypto.randomUUID(), prompt: chunks[i], n_votes: 1, temperature, max_tokens, stop: stop || undefined };
+    resultsStore.set(subId, { ts: Date.now(), list: [], est_fee: 0, est_tokens_in: Math.round(chunks[i].length / 3.5), est_tokens_out: max_tokens, assigned: new Set([node.node_id]), orch_parent: true });
+    subTasks.push({ subId, node: node.node_id });
+    try { await dispatchPayload(payload, node, {}); } catch (e) { console.log(`[orch] dispatch fail ${node.node_id}: ${e.message}`); }
+  }
+  console.log(`[orch] ${taskIdSafe(req)} k=${k} → ${subTasks.map(t => t.node).join(",")} mode=${dispatchMode}`);
+
+  // ---- SSE：每收返一個 sub-task 就 update progress + partial content ----
+  const partials = new Array(k).fill(null);
+  const gotNode = new Array(k).fill(null);
+  const waitStart = Date.now();
+  for (let i = 0; i < k; i++) {
+    // 剩餘時間分配：每個 sub-task 預留 30s，總體 90s 封頂
+    const budget = Math.max(8000, Math.min(60000, 90000 - (Date.now() - waitStart)));
+    const rec = await waitResult(subTasks[i].subId, budget);
+    if (rec?.list?.length) {
+      const nodeResult = rec.list[rec.list.length - 1];
+      const votes = nodeResult.votes || [];
+      const content = votes.map(v => String(v.content || "")).filter(Boolean).join("\n");
+      partials[i] = content || null;
+      gotNode[i] = nodeResult.node_id;
+      const done = partials.filter(p => p !== null).length;
+      if (sendSSE) {
+        // partial content（即使係 thinking 都先流出嚟）
+        if (content) sseChunk(res, { choices: [{ index: 0, delta: { content: content }, finish_reason: null }], swarm_progress: { stage: "working", total: k, done, result_node: nodeResult.node_id } });
+        else emitStage("working", done, k, nodeResult.node_id);
+      }
+      console.log(`[orch] sub ${i + 1}/${k} ✓ ${nodeResult.node_id}`);
+    } else {
+      partials[i] = "(子任務無結果)";
+      if (sendSSE) emitStage("working", partials.filter(p => p !== null).length, k);
+    }
+  }
+
+  // ---- 2️⃣ 綜合：將 partial 組成一條 finalize prompt → 派單 node（client→free→paid）----
+  if (sendSSE) emitStage("finalize", k, k);
+  const summaryLines = partials.map((p, i) => `===== 子任務 ${i + 1} =====\n${String(p || "").slice(0, 1500)}`).join("\n\n");
+  const finalizePrompt = `我有一個大任務，已經拆成 ${k} 個子任務並由唔同 worker 處理。請將以下子任務結果綜合成一個完整、連貫、詳細嘅最終答案，唔好淨係複述，要整合：\n\n${summaryLines}\n\n===== 最終答案 =====`;
+  const finNode = preferred[0].node;
+  const finId = crypto.randomUUID();
+  const finPayload = { task_id: finId, beacon_id: crypto.randomUUID(), prompt: finalizePrompt, n_votes: 1, temperature: Math.min(0.6, temperature + 0.1), max_tokens, stop: stop || undefined };
+  resultsStore.set(finId, { ts: Date.now(), list: [], est_fee: 0, est_tokens_in: Math.round(finalizePrompt.length / 3.5), est_tokens_out: max_tokens, assigned: new Set([finNode.node_id]) });
+  try { await dispatchPayload(finPayload, finNode, {}); } catch (e) { console.log(`[orch] finalize dispatch fail ${finNode.node_id}: ${e.message}`); }
+  const finRec = await waitResult(finId, 60000);
+  const finVotes = (finRec?.list || []).flatMap(r => r.votes || []);
+  const finalContent = finVotes.map(v => String(v.content || "")).filter(Boolean).join("\n") || partials.filter(Boolean).join("\n");
+  const allNodes = [...gotNode.filter(Boolean), finNode.node_id];
+
+  if (sendSSE) emitStage("done", k, k);
+  return finishOrchestration(res, { modelKey, task_id: finId, prompt, content: finalContent, estFee, dispatchMode, nodes_used: allNodes, stream, stop, sseStarted: sendSSE, tin: (finRec?.list || []).reduce((s, r) => s + (r.tokens_in || 0), 0) + subTasks.reduce((s, i) => s + (resultsStore.get(i.subId)?.list?.reduce((x, r) => x + (r.tokens_in || 0), 0) || 0), 0), tout: (finRec?.list || []).reduce((s, r) => s + (r.tokens_out || 0), 0) + subTasks.reduce((s, i) => s + (resultsStore.get(i.subId)?.list?.reduce((x, r) => x + (r.tokens_out || 0), 0) || 0), 0) });
+}
+
+// 包裝最終 response（共用 stream / non-stream）
+// o.sseStarted：SSE headers 已開（orchestrator 已 send 過 progress events）→ 直接 append final + [DONE]
+function finishOrchestration(res, o) {
+  const winner = o.content || "";
+  const created = Math.floor(Date.now() / 1000);
+  const st = { stages: ["decompose", "dispatch", "working", "finalize"], nodes: o.nodes_used, mode: o.dispatchMode, orchestrated: true };
+  if (o.stream) {
+    if (!o.sseStarted) {
+      res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.flushHeaders?.();
+    }
+    const base = { id: o.task_id, object: "chat.completion.chunk", created, model: o.modelKey };
+    sseChunk(res, { ...base, choices: [{ index: 0, delta: { role: "assistant", content: winner }, finish_reason: null }], swarmai: st });
+    sseChunk(res, { ...base, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] });
+    sseChunk(res, { ...base, choices: [], usage: { prompt_tokens: Math.round(o.prompt.length / 3.5), completion_tokens: o.tout, total_tokens: Math.round(o.prompt.length / 3.5) + o.tout } });
+    res.write("data: [DONE]\n\n");
+    res.end();
+    return;
+  }
+  return res.json({
+    id: o.task_id, object: "chat.completion", created, model: o.modelKey,
+    choices: [{ index: 0, message: { role: "assistant", content: winner }, finish_reason: "stop" }],
+    usage: { prompt_tokens: Math.round(o.prompt.length / 3.5), completion_tokens: o.tout, total_tokens: Math.round(o.prompt.length / 3.5) + o.tout },
+    swarmai: st,
+  });
+}
+function taskIdSafe() { return crypto.randomUUID().slice(0, 8); }
+
 app.post("/v1/chat/completions", async (req, res) => {
   try {
     const { model = "swarmai-normal", messages = [], temperature = 0.6, max_tokens = 512, stream = false, tools, tool_choice, stop } = req.body || {};
@@ -1118,6 +1346,10 @@ app.post("/v1/chat/completions", async (req, res) => {
     const estPromptTokens = Math.round(prompt.length / 3.5) + (images.length ? 1024 * images.length : 0);
     const ctxOptions = [...registry.values()].filter(n => n.account && n.max_context > 0).map(n => n.max_context);
     const minCtx = ctxOptions.length ? Math.min(...ctxOptions) : 8192;
+    // swarmai-orch：用戶明揀 + text-only + 超細 ctx → 行拆解派工（唔 413）
+    if (mm.orchestrate && !useTool && !hasImage && estPromptTokens > minCtx) {
+      return handleOrchestration(req, res, { modelKey, mm, prompt, temperature, max_tokens, stream, stop, reqAcc: reqTok ? accountForToken(reqTok) : null, reqTok, minCtx });
+    }
     if (!useTool && estPromptTokens > minCtx) {
       return res.status(413).json({ error: { message: `prompt 太大（~${estPromptTokens} tokens，網絡上限 ${minCtx}）——建議開新 context/縮短對話`, type: "context_length_exceeded" }, type: "context_length_exceeded" });
     }
