@@ -394,6 +394,16 @@ function mkToken() { return "swai-" + crypto.randomBytes(16).toString("hex"); }
 function findUserByToken(t) {
   return db.prepare("SELECT u.email, u.node_id, u.created AS acct_created, k.token, k.label, k.scope, k.last_used_at, k.last_ip FROM user_keys k JOIN users u ON u.email=k.email WHERE k.token=?").get(String(t));
 }
+// 用戶預設 model（portal Profile 揀嘅 pref_model）→ 攞出嚟用於「冇帶 model」時兜底。
+// 只接受 MODEL_MAP 存在、非 hidden、非 unit（image/video 唔可以當 text 預設）。
+function prefModelOf(tok) {
+  if (!tok || tok === NET_TOKEN) return null;
+  const u = findUserByToken(tok);
+  if (!u) return null;
+  const row = db.prepare("SELECT pref_model FROM users WHERE email=?").get(u.email);
+  const m = row && row.pref_model && MODEL_MAP[row.pref_model];
+  return (m && !m.hidden && !m.unit) ? row.pref_model : null;
+}
 function findUserByNode(node_id) {
   const owner = nodeOwner(node_id);
   if (!owner) return null;
@@ -1398,13 +1408,15 @@ function taskIdSafe() { return crypto.randomUUID().slice(0, 8); }
 
 app.post("/v1/chat/completions", async (req, res) => {
   try {
-    const { model = "swarmai-normal", messages = [], temperature = 0.6, max_tokens = 512, stream = false, tools, tool_choice, stop } = req.body || {};
+    const { model, messages = [], temperature = 0.6, max_tokens = 512, stream = false, tools, tool_choice, stop } = req.body || {};
     if (!Array.isArray(messages) || messages.length === 0)
       return res.status(400).json({ error: { message: "messages required" }, type: "invalid_request_error" });
     const reqTok = req.get("x-swarm-token") || (req.swarmToken || "");
     const hasImage = detectImageInMessages(messages);
     const useTool = isToolRequest(messages, tools);
-    const modelKey = hasImage ? "swarmai-vision" : (MODEL_MAP[model] ? model : "swarmai-normal");
+    // model 解析順序：① 用戶明確帶 model（有效）→ 尊重；② 冇帶 → 用 user pref_model；③ 無效/空 pref → swarmai-normal
+    const pref = prefModelOf(reqTok);
+    const modelKey = hasImage ? "swarmai-vision" : (MODEL_MAP[model] ? model : (pref || "swarmai-normal"));
     const mm = MODEL_MAP[modelKey];
     const prompt = useTool ? "" : messagesToPrompt(messages);
     const images = hasImage ? extractImagesFromMessages(messages) : [];
@@ -1828,7 +1840,9 @@ app.post("/portal/update_profile", (req, res) => {
   const b = req.body || {};
   const fields = {};
   if (b.display_name !== undefined) fields.display_name = String(b.display_name).slice(0, 40);
-  if (b.pref_model !== undefined && ["swarmai-fast", "swarmai-normal"].includes(b.pref_model)) fields.pref_model = b.pref_model;
+  // 白名單 = MODEL_MAP 所有非 hidden model（fast/normal/free/orch/image/video…），同 MODEL_MAP 同步唔會漏
+  const PUBLIC_MODELS = Object.entries(MODEL_MAP).filter(([, m]) => !m.hidden).map(([id]) => id);
+  if (b.pref_model !== undefined && PUBLIC_MODELS.includes(b.pref_model)) fields.pref_model = b.pref_model;
   if (b.timezone !== undefined) fields.timezone = String(b.timezone).slice(0, 40);
   if (b.sleep_start_hour !== undefined) fields.sleep_start_hour = Math.max(0, Math.min(23, Number(b.sleep_start_hour) || 0));
   if (b.sleep_end_hour !== undefined) fields.sleep_end_hour = Math.max(0, Math.min(23, Number(b.sleep_end_hour) || 7));
