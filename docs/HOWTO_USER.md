@@ -25,6 +25,8 @@ docker run -d --name swarm-worker \
 ```
 
 ## ③ 使用
+- **普通人**：登入 https://swarmai.club/portal/ → 聊天卡直接問。預設 `swarmai-orch`。同一句再問會用返配方，唔再派工。
+
 ```bash
 # 驗證
 curl -s -H "x-swarm-token: <token>" "https://swarmai.club/swarm/nodes"

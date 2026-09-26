@@ -142,6 +142,35 @@ function accountForToken(t) {
   const u = findUserByToken ? findUserByToken(t) : null;
   return u ? u.email : null;
 }
+const RECIPE_TTL_MS = 7 * 24 * 3600 * 1000;
+function recipeKey(messages, modelKey, useTool, hasImage) {
+  if (useTool || hasImage) return null;
+  if (modelKey === "swarmai-image" || modelKey === "swarmai-video" || modelKey === "swarmai-vision") return null;
+  let q = "";
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m && m.role === "user" && typeof m.content === "string") { q = m.content; break; }
+  }
+  const norm = String(q).trim().toLowerCase().replace(/\s+/g, " ");
+  if (norm.length < 8 || norm.length > 500) return null;
+  return { q: norm, hash: crypto.createHash("sha256").update(norm).digest("hex") };
+}
+function recipeGet(account, hash) {
+  if (!account || !hash) return null;
+  const row = db.prepare("SELECT answer, model, created_at FROM recipes WHERE account=? AND qhash=?").get(account, hash);
+  if (!row) return null;
+  if (Date.now() - row.created_at > RECIPE_TTL_MS) {
+    db.prepare("DELETE FROM recipes WHERE account=? AND qhash=?").run(account, hash);
+    return null;
+  }
+  return row;
+}
+function recipePut(account, hash, question, answer, model) {
+  if (!account || !hash || !answer) return;
+  db.prepare(`INSERT INTO recipes(account,qhash,question,answer,model,created_at) VALUES(?,?,?,?,?,?)
+    ON CONFLICT(account,qhash) DO UPDATE SET answer=excluded.answer, model=excluded.model, question=excluded.question, created_at=excluded.created_at`)
+    .run(account, hash, String(question).slice(0, 500), answer, model || "", Date.now());
+}
 
 // ---- Logical model map (OpenAI gateway) ----
 // 對外 model ID → 派工群組 + tier 收費倍率
@@ -373,6 +402,15 @@ db.exec(`CREATE TABLE IF NOT EXISTS daily_usage(
   day TEXT NOT NULL,
   total INTEGER DEFAULT 0,
   PRIMARY KEY(account, day)
+)`);
+db.exec(`CREATE TABLE IF NOT EXISTS recipes(
+  account TEXT NOT NULL,
+  qhash TEXT NOT NULL,
+  question TEXT,
+  answer TEXT NOT NULL,
+  model TEXT,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY(account, qhash)
 )`);
 function hashPass(p) { return crypto.scryptSync(String(p), "swaimail", 32).toString("hex"); }
 function mkNodeId(email) {
@@ -1412,12 +1450,26 @@ app.post("/v1/chat/completions", async (req, res) => {
     if (!Array.isArray(messages) || messages.length === 0)
       return res.status(400).json({ error: { message: "messages required" }, type: "invalid_request_error" });
     const reqTok = req.get("x-swarm-token") || (req.swarmToken || "");
+    const reqAcc = reqTok ? accountForToken(reqTok) : null;
     const hasImage = detectImageInMessages(messages);
     const useTool = isToolRequest(messages, tools);
     // model 解析順序：① 用戶明確帶 model（有效）→ 尊重；② 冇帶 → 用 user pref_model；③ 無效/空 pref → swarmai-normal
     const pref = prefModelOf(reqTok);
     const modelKey = hasImage ? "swarmai-vision" : (MODEL_MAP[model] ? model : (pref || "swarmai-normal"));
     const mm = MODEL_MAP[modelKey];
+    const recKey = recipeKey(messages, modelKey, useTool, hasImage);
+    if (recKey && reqAcc && !stream) {
+      const hit = recipeGet(reqAcc, recKey.hash);
+      if (hit) {
+        console.log(`[v1] recipe hit account=${reqAcc}`);
+        return res.json({
+          id: "recipe-" + taskIdSafe(), object: "chat.completion", created: Math.floor(Date.now() / 1000), model: modelKey,
+          choices: [{ index: 0, message: { role: "assistant", content: hit.answer }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+          swarmai: { recipe: true, nodes: [], votes: [], confidence: 1, est_fee: 0, mode: "recipe", notice: "用返你上次呢句嘅答案" },
+        });
+      }
+    }
     const prompt = useTool ? "" : messagesToPrompt(messages);
     const images = hasImage ? extractImagesFromMessages(messages) : [];
     // context 防護：估算 prompt tokens，對比網絡內 node 最細可用 ctx（保守）
@@ -1449,7 +1501,6 @@ app.post("/v1/chat/completions", async (req, res) => {
       console.log(`[v1] fallback all-candidates=${candidates.map(c=>c.node_id).join(",")}`);
     }
     // 排序：score（含 rating/grade × share_ratio）為主，speed 只做 tiebreak
-    const reqAcc = reqTok ? accountForToken(reqTok) : null;
     const sorted = matchCapabilities(mm.cap, candidates, reqAcc).sort((a,b) =>
       b.score - a.score || (parseFloat(b.node.speed)||0) - (parseFloat(a.node.speed)||0));
     console.log(`[v1] sorted=${sorted.map(s=>s.node.node_id+":"+s.score.toFixed(2)).join(",")}`);
@@ -1628,6 +1679,7 @@ app.post("/v1/chat/completions", async (req, res) => {
 
     const message = { role: "assistant", content: winner || "" };
     if (toolCalls) message.tool_calls = toolCalls;
+    if (recKey && reqAcc && winner && !toolCalls) recipePut(reqAcc, recKey.hash, recKey.q, winner, modelKey);
     const bodyObj = {
       id: task_id, object: "chat.completion", created: Math.floor(Date.now()/1000), model: modelKey,
       choices: [{ index: 0, message, finish_reason: toolCalls ? "tool_calls" : winner ? (finishReason || "stop") : "length" }],

@@ -73,6 +73,15 @@ th{color:var(--acc)}
   <div class="err" id="err"></div>
 
   <div id="dash" class="hide">
+    <div class="card" id="chat-card">
+      <div class="muted" style="margin-bottom:8px">聊天 — 後面個網絡會答。預設 swarmai-orch。</div>
+      <div id="chat-log" style="max-height:280px;overflow:auto;font-size:.85rem;line-height:1.45;margin-bottom:8px"></div>
+      <div style="display:flex;gap:8px">
+        <input id="chat-in" placeholder="問一句" style="flex:1" onkeydown="if(event.key==='Enter')sendChat()">
+        <button style="width:auto;padding:9px 16px;margin:0" onclick="sendChat()">送出</button>
+      </div>
+      <div class="muted" id="chat-foot" style="margin-top:6px"></div>
+    </div>
     <div class="card">
       <div class="stat">
         <div><div class="muted"><span data-i18n="p_bal_lbl">SWAI 點數（off-chain）</span></div><div class="big" id="bal">—</div></div>
@@ -207,6 +216,52 @@ document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
   document.getElementById('err').textContent='';
 });
 function E(id){return document.getElementById(id)}
+function chatEndpoint(){
+  if (location.pathname.indexOf('/portal') === 0 && String(location.port) !== '4900') return '/swarm/v1/chat/completions';
+  return '/v1/chat/completions';
+}
+function humanLine(s){
+  if (!s) return '';
+  const bits = [];
+  if (s.recipe) bits.push('用返你上次呢句嘅答案');
+  if (s.orchestrated) bits.push('長任務已拆開再合併');
+  const n = (s.votes && s.votes.length) || (s.nodes && s.nodes.length) || 0;
+  if (n > 1) bits.push(n + ' 部機投票，信心 ' + (s.confidence ?? ''));
+  else if (!s.recipe && !s.orchestrated) bits.push('1 部機答咗');
+  if (s.notice && !s.recipe) bits.push(s.notice);
+  return bits.join(' · ');
+}
+function addChat(who, text){
+  const d = document.createElement('div');
+  d.style.margin = '6px 0';
+  const b = document.createElement('b');
+  b.textContent = who + ' ';
+  d.appendChild(b);
+  d.appendChild(document.createTextNode(text));
+  E('chat-log').appendChild(d);
+  E('chat-log').scrollTop = E('chat-log').scrollHeight;
+}
+async function sendChat(){
+  const q = (E('chat-in').value || '').trim();
+  if (!q || !window.__tok) return;
+  E('chat-in').value = '';
+  addChat('你', q);
+  E('chat-foot').textContent = '思考緊…';
+  try {
+    const r = await fetch(chatEndpoint(), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-swarm-token': window.__tok },
+      body: JSON.stringify({ model: 'swarmai-orch', messages: [{ role: 'user', content: q }], max_tokens: 400 })
+    });
+    const d = await r.json();
+    const ans = d.choices && d.choices[0] && d.choices[0].message && d.choices[0].message.content;
+    const err = d.error && (d.error.message || d.error);
+    addChat('Swarm', ans || String(err || '冇答案'));
+    E('chat-foot').textContent = humanLine(d.swarmai) || (err ? String(err) : '');
+  } catch (e) {
+    E('chat-foot').textContent = '連線失敗';
+  }
+}
 async function api(path, body, token){
   const r = await fetch(path, {method:'POST', headers:{'content-type':'application/json', ...(token?{'x-swarm-token':token}:{})}, body: JSON.stringify(body)});
   return r.json();
