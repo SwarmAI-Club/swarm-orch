@@ -79,6 +79,7 @@ th{color:var(--acc)}
       <div style="display:flex;gap:8px">
         <input id="chat-in" placeholder="問一句" style="flex:1" onkeydown="if(event.key==='Enter')sendChat()">
         <button style="width:auto;padding:9px 16px;margin:0" onclick="sendChat()">送出</button>
+        <button style="width:auto;padding:9px 12px;margin:0;background:#1f2937;color:var(--txt)" onclick="clearChat()">清呢段</button>
       </div>
       <div class="muted" id="chat-foot" style="margin-top:6px"></div>
     </div>
@@ -241,22 +242,58 @@ function addChat(who, text){
   E('chat-log').appendChild(d);
   E('chat-log').scrollTop = E('chat-log').scrollHeight;
 }
+function chatStoreKey(){
+  const id = (E('nodeid') && E('nodeid').textContent) || '';
+  if (!id || id === '—') return null;
+  return 'swarm-chat:' + id;
+}
+function loadChat(){
+  E('chat-log').textContent = '';
+  window.__chat = [];
+  const key = chatStoreKey();
+  if (!key) return;
+  try { window.__chat = JSON.parse(localStorage.getItem(key) || '[]'); } catch (e) { window.__chat = []; }
+  if (!Array.isArray(window.__chat)) window.__chat = [];
+  window.__chat.forEach(m => addChat(m.role === 'user' ? '你' : 'Swarm', m.content || ''));
+}
+function saveChat(){
+  const key = chatStoreKey();
+  if (!key) return;
+  window.__chat = (window.__chat || []).slice(-40);
+  localStorage.setItem(key, JSON.stringify(window.__chat));
+}
+function clearChat(){
+  const key = chatStoreKey();
+  if (key) localStorage.removeItem(key);
+  window.__chat = [];
+  E('chat-log').textContent = '';
+  E('chat-foot').textContent = '';
+}
 async function sendChat(){
   const q = (E('chat-in').value || '').trim();
   if (!q || !window.__tok) return;
   E('chat-in').value = '';
+  if (!window.__chat) window.__chat = [];
   addChat('你', q);
   E('chat-foot').textContent = '思考緊…';
+  const messages = window.__chat.slice(-5).concat([{ role: 'user', content: q }]).slice(-6);
   try {
     const r = await fetch(chatEndpoint(), {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-swarm-token': window.__tok },
-      body: JSON.stringify({ model: 'swarmai-orch', messages: [{ role: 'user', content: q }], max_tokens: 400 })
+      body: JSON.stringify({ model: 'swarmai-orch', messages: messages, max_tokens: 400 })
     });
     const d = await r.json();
     const ans = d.choices && d.choices[0] && d.choices[0].message && d.choices[0].message.content;
     const err = d.error && (d.error.message || d.error);
-    addChat('Swarm', ans || String(err || '冇答案'));
+    if (ans) {
+      window.__chat.push({ role: 'user', content: q });
+      window.__chat.push({ role: 'assistant', content: ans });
+      saveChat();
+      addChat('Swarm', ans);
+    } else {
+      addChat('Swarm', String(err || '冇答案'));
+    }
     E('chat-foot').textContent = humanLine(d.swarmai) || (err ? String(err) : '');
   } catch (e) {
     E('chat-foot').textContent = '連線失敗';
@@ -305,6 +342,7 @@ function enter(d){
   const tabs = document.querySelector('.tabs');
   if (tabs) tabs.classList.add('hide');
   loadMe();
+  loadChat();
   setInterval(loadMe, 15000);
 }
 async function loadMe(){
