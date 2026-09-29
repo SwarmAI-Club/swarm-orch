@@ -526,6 +526,7 @@ const registry = new Map();       // node_id -> capabilities/model/gpu/url
 const pendingBeacons = new Map(); // beacon_id -> {required, responses, ts}
 const resultsStore = new Map();   // task_id -> {ts, list: task_result[]}
 const inbox = new Map();          // node_id -> [{task_id,prompt,n_votes,temperature}] (pull mode)
+let searchRR = -1;                // /v1/search round-robin index（search nodes 同分時平均派）
 
 function jaccard(a, b) {
   if (!a.length || !b.length) return 0;
@@ -1821,7 +1822,10 @@ app.post("/v1/search", async (req, res) => {
     let candidates = [...registry.values()].filter(n => n.account && (n.capabilities || []).includes("search"));
     if (!candidates.length) return res.status(503).json({ error: { message: "no search worker available（未有 search node）", type: "server_error" } });
     const sorted = matchCapabilities(mm.cap, candidates, reqAcc).sort((a,b) => b.score - a.score);
-    let target = sorted[0].node;
+    console.log(`[search] cand=${candidates.map(c=>c.node_id).join(",")} sorted=${sorted.map(s=>s.node.node_id+":"+s.score.toFixed(2)).join(",")}`);
+    // 全部 search node 同分（speed 一樣）→ round-robin 平均派（唔好次次同一個）
+    const rr = (searchRR = (searchRR + 1) % Math.max(1, sorted.length));
+    let target = sorted[rr].node;
     // free node / 自己 node → 免費；其他照 unit 收費（search 平：1 SWAI/query）
     let estFee = 0, freeServed = false, dispatchMode = "self";
     if (reqAcc && reqTok !== NET_TOKEN && !(target.account === reqAcc) && !target.free) {
@@ -1833,7 +1837,7 @@ app.post("/v1/search", async (req, res) => {
         else return res.status(402).json({ error: { message: `SWAI 餘額不足 (balance ${bal}, need ${estFee})` }, type: "insufficient_balance" });
       } else { ledgerBurnChecked(reqAcc, estFee, "search_" + Date.now(), "search_estimate"); dispatchMode = "paid"; }
     } else if (target.free) { freeServed = true; dispatchMode = "free"; }
-    target = sorted[0].node;
+    // 保留 round-robin 揀嘅 target（唔好 reset 去 sorted[0]，會令 search 次次派同一 node）
     const task_id = crypto.randomUUID();
     const payload = { task_id, adapter: "search", prompt: query, n: units, max_tokens: 0 };
     resultsStore.set(task_id, { ts: Date.now(), list: [], est_fee: estFee, units, unit_price: 1, assigned: new Set([target.node_id]) });

@@ -12,7 +12,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # swarm-orc
 AGENT = os.path.join(ROOT, "agent")
 ROUTER_JS = os.path.join(ROOT, "router", "router.js")
 CONFIG_JSON = os.path.join(AGENT, "agent.json")
-PORT = 5910
+PORT = 5911
 BASE = f"http://127.0.0.1:{PORT}"
 
 
