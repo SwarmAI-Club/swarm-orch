@@ -292,15 +292,19 @@ class Worker:
                 out = self.adapter_image(prompt, n=n, size=size)
             elif kind == "video":
                 out = self.adapter_video(prompt, n=n)
+            elif kind == "search":
+                out = self.adapter_search(prompt)
             else:
                 raise RuntimeError(f"unknown adapter: {kind}")
         except Exception as e:
             print(f"[adapter:{kind}] FAIL: {e}", file=sys.stderr)
             out = {"images": [], "units": 0, "error": str(e)[:200]}
+        # search adapter 回傳純文字結果（searxng）—— 唔係圖片
+        result_text = out.get("content") or out.get("error") or f"{kind} OK"
         payload = {
             "type": "task_result", "task_id": body.get("task_id"),
             "node_id": self.args.node_id,
-            "votes": [{"content": out.get("error") or f"{kind} OK ({len(out.get('images', []))} 張)", "confidence": 0.9, "reasoning": ""}],
+            "votes": [{"content": result_text, "confidence": 0.9, "reasoning": ""}],
             "images": out.get("images", []),
             "units": out.get("units", 0),
             "duration_ms": int((time.time() - t0) * 1000),
@@ -337,6 +341,27 @@ class Worker:
         if not url:
             raise RuntimeError("video adapter 需要 WAN_API_URL（ComfyUI workflow endpoint）—— 而家係 stub")
         raise RuntimeError("Wan adapter 未實作（準備 NYI）")
+
+    def adapter_search(self, query):
+        """searxng web search adapter。endpoint = --completion 指向 searxng（如 http://<ip>:8081）。
+        回傳 {content: 文字結果清單, units: 1}。"""
+        base = str(self.args.completion or "").rstrip("/")
+        if not base:
+            raise RuntimeError("search adapter 需要 --completion 指向 searxng（例如 http://<ip>:8081）")
+        max_n = int(os.environ.get("SEARXNG_MAX_RESULTS", "5"))
+        r = requests.get(base + "/search", params={"q": query, "format": "json"}, timeout=30)
+        r.raise_for_status()
+        j = r.json()
+        results = (j.get("results") or [])[:max_n]
+        lines = [f"Web search: {query}"]
+        for i, res in enumerate(results, 1):
+            title = res.get("title") or ""
+            url = res.get("url") or ""
+            content = (res.get("content") or "").strip().replace("\n", " ")
+            lines.append(f"{i}. {title} — {url}\n   {content[:200]}")
+        if not results:
+            lines.append("(無結果)")
+        return {"content": "\n".join(lines), "units": 1}
 
     def heartbeat_once(self, sleeping=False):
         try:
@@ -454,8 +479,8 @@ def main():
     ap.add_argument("--router-secret", default=os.environ.get("SWARM_ROUTER_SECRET", ""), help="router 派工簽名 secret（缺省用 token）")
     ap.add_argument("--node-id", default=os.environ.get("HOSTNAME", "node-" + uuid.uuid4().hex[:6]))
     ap.add_argument("--completion", default=os.environ.get("SWARM_COMPLETION"), help="llama-server /completion URL (adapter 用 SD_API_URL/WAN_API_URL)")
-    ap.add_argument("--adapter", default=os.environ.get("SWARM_ADAPTER", ""), choices=["", "image", "video"],
-                    help="specialty adapter: image(SD-WebUI)/video(Wan)。用 adapter 時 --completion 可係 SD/ComfyUI API 址")
+    ap.add_argument("--adapter", default=os.environ.get("SWARM_ADAPTER", ""), choices=["", "image", "video", "search"],
+                    help="specialty adapter: image(SD-WebUI)/video(Wan)/search(searxng)。用 adapter 時 --completion 可係 SD/ComfyUI/API 址")
     ap.add_argument("--capabilities", nargs="*", default=["reasoning", "math", "analysis"])
     ap.add_argument("--model", default=os.environ.get("SWARM_MODEL", "unknown"))
     ap.add_argument("--gpu", default=os.environ.get("SWARM_GPU", ""))

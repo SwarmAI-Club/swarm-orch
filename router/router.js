@@ -145,7 +145,7 @@ function accountForToken(t) {
 const RECIPE_TTL_MS = 7 * 24 * 3600 * 1000;
 function recipeKey(messages, modelKey, useTool, hasImage) {
   if (useTool || hasImage) return null;
-  if (modelKey === "swarmai-image" || modelKey === "swarmai-video" || modelKey === "swarmai-vision") return null;
+  if (modelKey === "swarmai-image" || modelKey === "swarmai-video" || modelKey === "swarmai-vision" || modelKey === "swarmai-search") return null;
   let q = "";
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
@@ -182,6 +182,7 @@ const MODEL_MAP = {
   "swarmai-orch":     { cap: ["reasoning", "math", "analysis", "code"], tier: ["S", "A", "B", "C"], n_votes: 1, votable: false, strategy: "self-first", orchestrate: true, label: "長任務拆解 + 分散派工 + 綜合（client node 優先 → free）" },
   "swarmai-image":    { cap: ["image-gen"], tier: ["A", "B", "C"], n_votes: 1, votable: false, strategy: "fastest", unit: true, unitPer: "job", unitPrice: IMAGE_UNIT_PRICE, max_units: 4, label: "圖像生成（SD/ComfyUI）" },
   "swarmai-video":    { cap: ["video-gen"], tier: ["A", "B", "C"], n_votes: 1, votable: false, strategy: "fastest", unit: true, unitPer: "job", unitPrice: VIDEO_UNIT_PRICE, max_units: 8, label: "視訊生成（Wan）" },
+  "swarmai-search":   { cap: ["search"], tier: ["A", "B", "C"], n_votes: 1, votable: false, strategy: "fastest", unit: true, unitPer: "query", unitPrice: 1, max_units: 1, hidden: true, label: "Web Search（searxng node）" },
 };
 // tier 收費倍率（需求方）同一緊 mint（供應方）用
 const TIER_RATE = { S: 1.8, A: 1.3, B: 1.0, C: 0.6 };       // 需求方收費
@@ -1801,6 +1802,63 @@ app.post("/v1/images/generations", async (req, res) => {
       created: Math.floor(Date.now()/1000), data: images, model,
       usage: { image_count: images.length },
       swarmai: { nodes: (rec.list || []).map(r => r.node_id), est_fee: estFee, free_served: freeServed, promo_used: promoUsed, mode: dispatchMode, notice: dispatchMode === "fallback" ? "SWAI 唔夠 / quota 到頂 → 已自動落返自己機 + free machine（免費）" : undefined },
+    });
+  } catch (e) {
+    res.status(500).json({ error: { message: String(e.message || e).slice(0, 200) }, type: "server_error" });
+  }
+});
+
+// ---- Web Search gateway: searxng 節點（swarmai-search, cap=search）----
+// 用法: POST /v1/search { "query": "bitcoin price", "model": "swarmai-search" }
+app.post("/v1/search", async (req, res) => {
+  try {
+    const { query = "", model = "swarmai-search", n = 1 } = req.body || {};
+    if (!query) return res.status(400).json({ error: { message: "query required" }, type: "invalid_request_error" });
+    const mm = MODEL_MAP[model] || MODEL_MAP["swarmai-search"];
+    const reqTok = req.get("x-swarm-token") || (req.swarmToken || "");
+    const reqAcc = reqTok ? accountForToken(reqTok) : null;
+    const units = Math.max(1, Math.min(mm.max_units || 1, Number(n) || 1));
+    let candidates = [...registry.values()].filter(n => n.account && (n.capabilities || []).includes("search"));
+    if (!candidates.length) return res.status(503).json({ error: { message: "no search worker available（未有 search node）", type: "server_error" } });
+    const sorted = matchCapabilities(mm.cap, candidates, reqAcc).sort((a,b) => b.score - a.score);
+    let target = sorted[0].node;
+    // free node / 自己 node → 免費；其他照 unit 收費（search 平：1 SWAI/query）
+    let estFee = 0, freeServed = false, dispatchMode = "self";
+    if (reqAcc && reqTok !== NET_TOKEN && !(target.account === reqAcc) && !target.free) {
+      estFee = units;
+      const bal = creditBalance(reqAcc);
+      const hasSelf = sorted.some(x => x.node.account === reqAcc || x.node.free);
+      if (bal < estFee) {
+        if (hasSelf) { const fb = sorted.find(x => x.node.account === reqAcc || x.node.free); estFee = 0; dispatchMode = "fallback"; sorted.length = 0; sorted.push({ node: fb.node, score: 1 }); target = fb.node; }
+        else return res.status(402).json({ error: { message: `SWAI 餘額不足 (balance ${bal}, need ${estFee})` }, type: "insufficient_balance" });
+      } else { ledgerBurnChecked(reqAcc, estFee, "search_" + Date.now(), "search_estimate"); dispatchMode = "paid"; }
+    } else if (target.free) { freeServed = true; dispatchMode = "free"; }
+    target = sorted[0].node;
+    const task_id = crypto.randomUUID();
+    const payload = { task_id, adapter: "search", prompt: query, n: units, max_tokens: 0 };
+    resultsStore.set(task_id, { ts: Date.now(), list: [], est_fee: estFee, units, unit_price: 1, assigned: new Set([target.node_id]) });
+    try {
+      const assignBody = { ...payload, auth: signAssign(task_id, target.node_id) };
+      if (target.pull || !nodePushAddrOK(target.url)) { const q = inbox.get(target.node_id) || []; q.push(assignBody); inbox.set(target.node_id, q); }
+      else await fetch(`${target.url}/assign`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(assignBody), signal: AbortSignal.timeout(60000) });
+    } catch (e) {
+      return res.status(500).json({ error: { message: `search worker 派工失敗：${e.message}`, type: "server_error" } });
+    }
+    const deadline = Date.now() + 60000;
+    let rec = resultsStore.get(task_id);
+    while (Date.now() < deadline) {
+      rec = resultsStore.get(task_id);
+      if (rec && rec.list.length) break;
+      await new Promise(r => setTimeout(r, 1000));
+    }
+    rec = resultsStore.get(task_id);
+    const content = (rec?.list || []).map(r => (r.votes?.[0]?.content || "")).filter(Boolean).join("\n");
+    if (!content) return res.status(500).json({ error: { message: "search worker 超時/無結果", type: "server_error" } });
+    if (reqAcc && estFee > 0) ledgerMint(reqAcc, { tokensIn: 0, tokensOut: 0, units: 0, taskId: task_id, note: "search_refund", nodeId: target.node_id, kind: "refund" });
+    res.json({
+      object: "search", query, created: Math.floor(Date.now() / 1000), model,
+      results_text: content,
+      swarmai: { nodes: (rec.list || []).map(r => r.node_id), est_fee: estFee, free_served: freeServed, mode: dispatchMode },
     });
   } catch (e) {
     res.status(500).json({ error: { message: String(e.message || e).slice(0, 200) }, type: "server_error" });
