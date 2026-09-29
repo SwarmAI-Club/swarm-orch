@@ -124,8 +124,12 @@ def llm_chat(chat_url, messages, tools=None, tool_choice=None, max_tokens=None, 
     choice = (j.get("choices") or [{}])[0]
     msg = choice.get("message") or {}
     usage = j.get("usage") or {}
+    # Qwythos-1M vision：content 通常空 → 答案喺 reasoning_content（2026-09-26 實測）
+    content = msg.get("content") or ""
+    if not str(content).strip():
+        content = (msg.get("reasoning_content") or "").strip()
     return {
-        "content": msg.get("content") or "",
+        "content": content,
         "tool_calls": msg.get("tool_calls"),
         "finish_reason": choice.get("finish_reason") or "stop",
         "tokens_in": int(usage.get("prompt_tokens") or 0),

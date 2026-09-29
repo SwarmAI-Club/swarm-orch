@@ -177,7 +177,7 @@ function recipePut(account, hash, question, answer, model) {
 const MODEL_MAP = {
   "swarmai-fast":     { cap: ["reasoning", "analysis"], tier: ["S", "A"], n_votes: 1, votable: true, strategy: "fastest", label: "勁機優先（極速）— 最快 S/A tier GPU" },
   "swarmai-normal":   { cap: ["reasoning", "math"], tier: ["B", "C"], n_votes: 1, votable: true, strategy: "self-first", label: "日常平價（省錢）— 自己機優先 B/C tier" },
-  "swarmai-vision": { cap: ["vision"], tier: ["S", "A", "B", "C"], n_votes: 1, votable: false, strategy: "fastest", vision: true, hidden: true, label: "Vision (auto-route)" },
+  "swarmai-vision": { cap: ["vision"], tier: ["S", "A", "B", "C"], n_votes: 1, votable: false, strategy: "vision-first", vision: true, hidden: true, label: "Vision (auto-route, 質素優先)" },
   "swarmai-free":     { cap: ["reasoning", "math", "analysis"], tier: ["S", "A", "B", "C"], n_votes: 1, votable: true, strategy: "self-then-free", freeOnly: true, label: "免費節點（完全免費）— 自己機優先，then free nodes" },
   "swarmai-orch":     { cap: ["reasoning", "math", "analysis", "code"], tier: ["S", "A", "B", "C"], n_votes: 1, votable: false, strategy: "self-first", orchestrate: true, label: "長任務拆解 + 分散派工 + 綜合（client node 優先 → free）" },
   "swarmai-image":    { cap: ["image-gen"], tier: ["A", "B", "C"], n_votes: 1, votable: false, strategy: "fastest", unit: true, unitPer: "job", unitPrice: IMAGE_UNIT_PRICE, max_units: 4, label: "圖像生成（SD/ComfyUI）" },
@@ -1526,7 +1526,15 @@ app.post("/v1/chat/completions", async (req, res) => {
       const selfNode = sorted.find(s => s.node.account === reqAcc);
       target = selfNode ? selfNode.node : sorted[0]?.node;
       console.log(`[v1] strategy=self-then-free → ${target?.node_id} (self=${!!selfNode})`);
-      
+
+    } else if (mm.strategy === "vision-first") {
+      // swarmai-vision: 全部 vision node 都 free → 質素優先（Qwen2.5-VL tier A > Qwythos tier C）
+      const TIER_RANK = { S: 0, A: 1, B: 2, C: 3, D: 4 };
+      const byQuality = [...sorted].sort((a, b) =>
+        (TIER_RANK[nodeTier(a.node)] ?? 9) - (TIER_RANK[nodeTier(b.node)] ?? 9) || b.score - a.score);
+      target = byQuality[0]?.node;
+      console.log(`[v1] strategy=vision-first → ${target?.node_id} (${nodeTier(target)} quality)`);
+
     } else {
       // fallback: 按 score
       target = sorted[0]?.node;
@@ -1594,6 +1602,10 @@ app.post("/v1/chat/completions", async (req, res) => {
       payload.chat_messages = messages;
       if (Array.isArray(tools) && tools.length) payload.tools = tools;
       if (tool_choice) payload.tool_choice = tool_choice;
+    } else if (hasImage) {
+      // Vision 模式：保留原始 messages（含 image_url data URI）→ worker 行 /v1/chat/completions 正路，
+      // 唔好用 /completion + image_data（Qwythos/Qwen-VL 對任何圖都幻覺，2026-09-26 實測）
+      payload.chat_messages = messages;
     }
     // ✅ Rating vote: 1% 機會做 multi-dispatch for quality comparison
     let isRatingVote = false;
