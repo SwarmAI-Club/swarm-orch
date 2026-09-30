@@ -180,6 +180,7 @@ const MODEL_MAP = {
   "swarmai-vision": { cap: ["vision"], tier: ["S", "A", "B", "C"], n_votes: 1, votable: false, strategy: "vision-first", vision: true, hidden: true, label: "Vision (auto-route, 質素優先)" },
   "swarmai-free":     { cap: ["reasoning", "math", "analysis"], tier: ["S", "A", "B", "C"], n_votes: 3, votable: true, strategy: "self-then-free", freeOnly: true, label: "免費節點（完全免費）— 自己機優先，then free nodes" },
   "swarmai-orch":     { cap: ["reasoning", "math", "analysis", "code"], tier: ["S", "A", "B", "C"], n_votes: 1, votable: false, strategy: "self-first", orchestrate: true, label: "長任務拆解 + 分散派工 + 綜合（client node 優先 → free）" },
+  "swarmai-long":     { cap: ["reasoning", "math", "analysis", "code"], tier: ["S", "A", "B", "C"], n_votes: 1, votable: false, strategy: "self-first", orchestrate: true, long: true, seg_votes: 2, label: "超長上下文（sequential chaining × 每段 parallel 投票）：拆 N 段，每段多 node 投票提質，段間接力（64k×N）" },
   "swarmai-image":    { cap: ["image-gen"], tier: ["A", "B", "C"], n_votes: 1, votable: false, strategy: "fastest", unit: true, unitPer: "job", unitPrice: IMAGE_UNIT_PRICE, max_units: 4, label: "圖像生成（SD/ComfyUI）" },
   "swarmai-video":    { cap: ["video-gen"], tier: ["A", "B", "C"], n_votes: 1, votable: false, strategy: "fastest", unit: true, unitPer: "job", unitPrice: VIDEO_UNIT_PRICE, max_units: 8, label: "視訊生成（Wan）" },
   "swarmai-search":   { cap: ["search"], tier: ["A", "B", "C"], n_votes: 1, votable: false, strategy: "fastest", unit: true, unitPer: "query", unitPrice: 1, max_units: 1, hidden: true, label: "Web Search（searxng node）" },
@@ -1429,6 +1430,126 @@ async function handleOrchestration(req, res, opts) {
   return finishOrchestration(res, { modelKey, task_id: finId, prompt, content: finalContent, estFee, dispatchMode, nodes_used: allNodes, stream, stop, sseStarted: sendSSE, tin: (finRec?.list || []).reduce((s, r) => s + (r.tokens_in || 0), 0) + subTasks.reduce((s, i) => s + (resultsStore.get(i.subId)?.list?.reduce((x, r) => x + (r.tokens_in || 0), 0) || 0), 0), tout: (finRec?.list || []).reduce((s, r) => s + (r.tokens_out || 0), 0) + subTasks.reduce((s, i) => s + (resultsStore.get(i.subId)?.list?.reduce((x, r) => x + (r.tokens_out || 0), 0) || 0), 0) });
 }
 
+// ---- swarmai-long: sequential chaining × 每段 parallel voting ----
+// 長 prompt 拆 N 段（每段 ≤ node ctx × 0.8），每段：
+//   1) parallel：派 seg_votes 個 node（idle-first）同時處理「累積 summary + 本段」
+//   2) 加權投票 → 段質素答案
+//   3) sequential：段答案 summary 餵入下一段（context 接力 → 有效 64k×N）
+// 最後一段 -> 最終答案。
+async function handleOrchLong(req, res, opts) {
+  const { modelKey, mm, prompt, temperature, max_tokens, stream, stop, reqAcc, reqTok, minCtx } = opts;
+  const topTier = mm.tier && mm.tier.length ? mm.tier[0] : "B";
+  const sendSSE = stream && !res.headersSent;
+
+  let candidates = [...registry.values()].filter(n => n.account && (mm.tier.includes(nodeTier(n)) || n.free));
+  if (!candidates.length) candidates = [...registry.values()].filter(n => n.account);
+  const scored = matchCapabilities(mm.cap, candidates, reqAcc).sort((a, b) => b.score - a.score);
+  if (!scored.length) return res.status(503).json({ error: { message: "no available worker" }, type: "server_error" });
+
+  const clientNodes = scored.filter(s => s.node.account === reqAcc);
+  const freeNodes = scored.filter(s => s.node.free);
+  const paidNodes = scored.filter(s => s.node.account !== reqAcc && !s.node.free);
+  const preferred = [...clientNodes, ...freeNodes, ...paidNodes];
+  if (!preferred.length) return res.status(503).json({ error: { message: "no available worker" }, type: "server_error" });
+
+  // 每段 budget：用網絡 LLM node 最細 ctx 計（保守），每段唔好超過 node 接得住
+  const ctxLow = Math.min(...scored.map(s => s.node.max_context || minCtx));
+  const segChars = Math.min(Math.floor(ctxLow * 0.75 * 3.5), Number(process.env.SWARM_LONG_SEG_MAX || 120000));
+  const { chunks, k } = decomposePrompt(prompt, segChars, Number(process.env.SWARM_LONG_MAX_SEG || 6));
+  if (k <= 1) return handleOrchestration(req, res, opts); // 唔使長模式
+
+  const segVotes = Math.max(1, Math.min(mm.seg_votes || 2, 3));
+  const dispatchPayload = (t, node) => {
+    const body = { ...t, auth: signAssign(t.task_id, node.node_id) };
+    if (node.pull || !nodePushAddrOK(node.url)) { const q = inbox.get(node.node_id) || []; q.push(body); inbox.set(node.node_id, q); }
+    else return fetch(`${node.url}/assign`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(150000) });
+  };
+  const waitResult = async (task_id, timeoutMs) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const rec = resultsStore.get(task_id);
+      if (rec && rec.list && rec.list.length) return rec;
+      await new Promise(r => setTimeout(r, 400));
+    }
+    return resultsStore.get(task_id);
+  };
+
+  const allSelf = preferred.every(s => s.node.account === reqAcc || s.node.free || !reqAcc);
+  let dispatchMode = "self";
+  let estFee = 0;
+  if (reqAcc && reqTok !== NET_TOKEN && !allSelf) {
+    const estIn = Math.round(prompt.length / 3.5);
+    const estOut = max_tokens * k * segVotes;
+    estFee = tokensToCredit(estIn, estOut, tierCharge(topTier));
+    const fallback = preferred.filter(s => s.node.account === reqAcc || s.node.free);
+    if (creditBalance(reqAcc) < estFee || estFee > dailyQuotaRemaining(reqAcc)) {
+      if (fallback.length) { dispatchMode = "fallback"; estFee = 0; }
+      else return res.status(402).json({ error: { message: `SWAI 餘額不足 (need ${estFee})`, type: "insufficient_balance" } });
+    } else { ledgerBurnChecked(reqAcc, estFee, null, "long_estimate"); dispatchMode = "paid"; }
+  }
+
+  if (sendSSE) {
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders?.();
+    sseChunk(res, { choices: [{ index: 0, delta: {}, finish_reason: null }], swarm_progress: { stage: "chain", total: k, done: 0, seg_votes: segVotes } });
+  }
+
+  // sequential chain：accumulator 係「前面所有段嘅摘要」
+  let acc = "";
+  const usedNodes = new Set();
+  let tinTotal = 0, toutTotal = 0;
+  for (let i = 0; i < k; i++) {
+    const segPrompt = acc
+      ? `以下是先前段落嘅摘要，請記住佢，並繼續處理新段落。\n\n===== 先前摘要 =====\n${acc}\n\n===== 新段落 ${i + 1}/${k} =====\n${chunks[i]}\n\n請基於摘要 + 新段落，輸出你最完整嘅回應（包括需要引用先前資訊嘅部分）。`
+      : `你係處理超長文件嘅 AI，依家處理第 1/${k} 段。\n\n${chunks[i]}\n\n請完整處理並輸出。`;
+    if (sendSSE) sseChunk(res, { choices: [{ index: 0, delta: {}, finish_reason: null }], swarm_progress: { stage: "chain", total: k, done: i, seg: i + 1, sub: "voting" } });
+
+    // 每段 parallel voting：揀 segVotes 個 idle-first node
+    const segPool = scored.filter(s => { const st = s.node.last_status?.status; return st === 'IDLE_SHARING' || s.node.free; });
+    const pool = segPool.length >= 2 ? segPool : scored;
+    const targets = pool.slice(0, Math.min(segVotes, pool.length)).map(s => s.node);
+    const tasks = [];
+    for (const node of targets) {
+      const task_id = crypto.randomUUID();
+      const payload = { task_id, beacon_id: crypto.randomUUID(), prompt: segPrompt, n_votes: 1, temperature, max_tokens, stop: stop || undefined };
+      resultsStore.set(task_id, { ts: Date.now(), list: [], est_fee: 0, est_tokens_in: Math.round(segPrompt.length / 3.5), est_tokens_out: max_tokens, assigned: new Set([node.node_id]), long_parent: true });
+      tasks.push({ task_id, node });
+      usedNodes.add(node.node_id);
+      try { await dispatchPayload(payload, node); } catch (e) { /* 落 inbox */ }
+    }
+    // 加權投票聚合本段
+    const tally = {};
+    const waitStart = Date.now();
+    const recs = [];
+    for (const t of tasks) {
+      const budget = Math.max(12000, Math.min(45000, 180000 - (Date.now() - waitStart)));
+      const rec = await waitResult(t.task_id, budget);
+      if (rec?.list?.length) {
+        recs.push(rec);
+        for (const r of rec.list) for (const v of (r.votes || [])) {
+          const ans = String(v.content || "").trim();
+          if (ans) tally[ans] = (tally[ans] || 0) + (v.confidence || 0.5);
+        }
+      }
+    }
+    const winner = Object.entries(tally).sort((a, b) => b[1] - a[1])[0];
+    const segAnswer = winner ? winner[0] : "(無結果)";
+    for (const r of recs) { for (const rr of r.list) { tinTotal += rr.tokens_in || 0; toutTotal += rr.tokens_out || 0; } }
+    // sequential：呢段答案摘要入 accumulator（截到 segChars 上限，控制下段 prompt）
+    acc = segAnswer.length > segChars ? segAnswer.slice(0, segChars) : segAnswer;
+    if (sendSSE) sseChunk(res, { choices: [{ index: 0, delta: {}, finish_reason: null }], swarm_progress: { stage: "chain", total: k, done: i + 1, seg: i + 1, result_nodes: targets.map(t => t.node_id) } });
+    console.log(`[long] seg ${i + 1}/${k} ✓ ${targets.map(t => t.node_id).join(",")} vote=${segVotes} ansLen=${segAnswer.length}`);
+  }
+
+  // 最終：將最後 acc 作為答案（已含全部段落接力）
+  const finalContent = acc || "(無結果)";
+  const allNodes = [...usedNodes];
+  if (sendSSE) sseChunk(res, { choices: [{ index: 0, delta: {}, finish_reason: null }], swarm_progress: { stage: "done", total: k, done: k } });
+  return finishOrchestration(res, { modelKey, task_id: "long-chain", prompt, content: finalContent, estFee, dispatchMode, nodes_used: allNodes, stream, stop, sseStarted: sendSSE, tin: tinTotal, tout: toutTotal });
+}
+
 // 包裝最終 response（共用 stream / non-stream）
 // o.sseStarted：SSE headers 已開（orchestrator 已 send 過 progress events）→ 直接 append final + [DONE]
 function finishOrchestration(res, o) {
@@ -1503,6 +1624,11 @@ app.post("/v1/chat/completions", async (req, res) => {
         (n.capabilities || []).some(c => ['reasoning','math','analysis','vision'].includes(c)))
       .map(n => n.max_context);
     const minCtx = llmCtxOptions.length ? Math.min(...llmCtxOptions) : 65536;
+    // swarmai-long：用戶明揀 → 長 prompt（>LONG_THRESHOLD tokens）行 sequential chain（每段 parallel voting）
+    // 即使單 node ctx 接得住都拆（長模式 = 保質素 + 串聯長上下文），避免「44k 一個 node 食晒」咁草率。
+    if (mm.long && !useTool && !hasImage && estPromptTokens > Number(process.env.SWARM_LONG_THRESHOLD || 24000)) {
+      return handleOrchLong(req, res, { modelKey, mm, prompt, temperature, max_tokens, stream, stop, reqAcc: reqTok ? accountForToken(reqTok) : null, reqTok, minCtx });
+    }
     // swarmai-orch：用戶明揀 + text-only + 超細 ctx → 行拆解派工（唔 413）
     if (mm.orchestrate && !useTool && !hasImage && estPromptTokens > minCtx) {
       return handleOrchestration(req, res, { modelKey, mm, prompt, temperature, max_tokens, stream, stop, reqAcc: reqTok ? accountForToken(reqTok) : null, reqTok, minCtx });
