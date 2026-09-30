@@ -84,6 +84,9 @@ if (!oldCredits && db.prepare("SELECT COUNT(*) c FROM credits").get().c > 0) {
   if (!cols.includes("account")) adds.push("ADD COLUMN account TEXT");
   for (const a of adds) db.exec(`ALTER TABLE ledger ${a}`);
 })();
+// token 估算 helper（2026-09-30）：中文/CJK 1 char ≈ 0.5-0.7 token，唔係英文 1/3.5。
+// 用保守 /2.2 平均，避免「估細咗令 ctx/拆段判斷錯」（中文 55k chars 實際 40k+ tokens）。
+function estTok(s) { return Math.round(String(s || "").length / 2.2); }
 // tokens → SWAI：input 用 RATE_IN，output 用 RATE_OUT（最少 1）。tierMult 需求收費倍率
 function tokensToCredit(tokensIn, tokensOut, tierMult = 1.0) {
   const sIn = Math.round((tokensIn || 0) / RATE_IN);
@@ -1338,7 +1341,7 @@ async function handleOrchestration(req, res, opts) {
   const allInternal = preferred.every(s => s.node.account === reqAcc || s.node.free || !reqAcc);
   let estFee = 0;
   if (reqAcc && reqTok !== NET_TOKEN && !allInternal) {
-    const estIn = Math.round(prompt.length / 3.5);
+    const estIn = estTok(prompt);
     const estOut = max_tokens * (k + 1);
     estFee = tokensToCredit(estIn, estOut, tierCharge(topTier));
     const fallback = preferred.filter(s => s.node.account === reqAcc || s.node.free);
@@ -1362,7 +1365,7 @@ async function handleOrchestration(req, res, opts) {
     const target = preferred[0].node;
     const task_id = crypto.randomUUID();
     const payload = { task_id, beacon_id: crypto.randomUUID(), prompt, n_votes: 1, temperature, max_tokens, stop: stop || undefined };
-    resultsStore.set(task_id, { ts: Date.now(), list: [], est_fee: estFee, est_tokens_in: Math.round(prompt.length / 3.5), est_tokens_out: max_tokens, assigned: new Set([target.node_id]) });
+    resultsStore.set(task_id, { ts: Date.now(), list: [], est_fee: estFee, est_tokens_in: estTok(prompt), est_tokens_out: max_tokens, assigned: new Set([target.node_id]) });
     try { await dispatchPayload(payload, target, {}); } catch (e) { /* 落 inbox */ }
     const rec = await waitResult(task_id, 30000);
     const votes = (rec?.list || []).flatMap(r => r.votes || []);
@@ -1379,7 +1382,7 @@ async function handleOrchestration(req, res, opts) {
     const node = useSet[i % useSet.length].node;
     const subId = crypto.randomUUID();
     const payload = { task_id: subId, beacon_id: crypto.randomUUID(), prompt: chunks[i], n_votes: 1, temperature, max_tokens, stop: stop || undefined };
-    resultsStore.set(subId, { ts: Date.now(), list: [], est_fee: 0, est_tokens_in: Math.round(chunks[i].length / 3.5), est_tokens_out: max_tokens, assigned: new Set([node.node_id]), orch_parent: true });
+    resultsStore.set(subId, { ts: Date.now(), list: [], est_fee: 0, est_tokens_in: estTok(chunks[i]), est_tokens_out: max_tokens, assigned: new Set([node.node_id]), orch_parent: true });
     subTasks.push({ subId, node: node.node_id });
     try { await dispatchPayload(payload, node, {}); } catch (e) { console.log(`[orch] dispatch fail ${node.node_id}: ${e.message}`); }
   }
@@ -1478,7 +1481,7 @@ async function handleOrchLong(req, res, opts) {
   let dispatchMode = "self";
   let estFee = 0;
   if (reqAcc && reqTok !== NET_TOKEN && !allSelf) {
-    const estIn = Math.round(prompt.length / 3.5);
+    const estIn = estTok(prompt);
     const estOut = max_tokens * k * segVotes;
     estFee = tokensToCredit(estIn, estOut, tierCharge(topTier));
     const fallback = preferred.filter(s => s.node.account === reqAcc || s.node.free);
@@ -1515,7 +1518,7 @@ async function handleOrchLong(req, res, opts) {
     for (const node of targets) {
       const task_id = crypto.randomUUID();
       const payload = { task_id, beacon_id: crypto.randomUUID(), prompt: segPrompt, n_votes: 1, temperature, max_tokens, stop: stop || undefined };
-      resultsStore.set(task_id, { ts: Date.now(), list: [], est_fee: 0, est_tokens_in: Math.round(segPrompt.length / 3.5), est_tokens_out: max_tokens, assigned: new Set([node.node_id]), long_parent: true });
+      resultsStore.set(task_id, { ts: Date.now(), list: [], est_fee: 0, est_tokens_in: estTok(segPrompt), est_tokens_out: max_tokens, assigned: new Set([node.node_id]), long_parent: true });
       tasks.push({ task_id, node });
       usedNodes.add(node.node_id);
       try { await dispatchPayload(payload, node); } catch (e) { /* 落 inbox */ }
@@ -1556,7 +1559,8 @@ async function handleOrchLong(req, res, opts) {
   const allNodes = [...usedNodes];
   if (sendSSE) sseChunk(res, { choices: [{ index: 0, delta: {}, finish_reason: null }], swarm_progress: { stage: "done", total: k, done: k, message: "✅ 完成" } });
   // 已逐步 stream 過每段 → 最後唔好重複成段 content（只 send finish reason）
-  return finishOrchestration(res, { modelKey, task_id: "long-chain", prompt, content: "", contentStreamed: sendSSE, estFee, dispatchMode, nodes_used: allNodes, stream, stop, sseStarted: sendSSE, tin: tinTotal, tout: toutTotal });
+  // 非 stream → 傳返最終內容
+  return finishOrchestration(res, { modelKey, task_id: "long-chain", prompt, content: sendSSE ? "" : finalContent, contentStreamed: sendSSE, estFee, dispatchMode, nodes_used: allNodes, stream, stop, sseStarted: sendSSE, tin: tinTotal, tout: toutTotal });
 }
 
 // 包裝最終 response（共用 stream / non-stream）
@@ -1578,7 +1582,7 @@ function finishOrchestration(res, o) {
       sseChunk(res, { ...base, choices: [{ index: 0, delta: { role: "assistant", content: winner }, finish_reason: null }], swarmai: st });
     }
     sseChunk(res, { ...base, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] });
-    sseChunk(res, { ...base, choices: [], usage: { prompt_tokens: Math.round(o.prompt.length / 3.5), completion_tokens: o.tout, total_tokens: Math.round(o.prompt.length / 3.5) + o.tout } });
+    sseChunk(res, { ...base, choices: [], usage: { prompt_tokens: estTok(o.prompt), completion_tokens: o.tout, total_tokens: estTok(o.prompt) + o.tout } });
     res.write("data: [DONE]\n\n");
     res.end();
     return;
@@ -1586,7 +1590,7 @@ function finishOrchestration(res, o) {
   return res.json({
     id: o.task_id, object: "chat.completion", created, model: o.modelKey,
     choices: [{ index: 0, message: { role: "assistant", content: winner }, finish_reason: "stop" }],
-    usage: { prompt_tokens: Math.round(o.prompt.length / 3.5), completion_tokens: o.tout, total_tokens: Math.round(o.prompt.length / 3.5) + o.tout },
+    usage: { prompt_tokens: estTok(o.prompt), completion_tokens: o.tout, total_tokens: estTok(o.prompt) + o.tout },
     swarmai: st,
   });
 }
@@ -1624,7 +1628,7 @@ app.post("/v1/chat/completions", async (req, res) => {
     //  - minCtx 用「實際會派工嘅候選 node」入面最細，唔係全網絡最細
     //    （否則細 ctx node（如 vision 32768）會拖低成個網絡上限，大 prompt 被誤拒）
     //  - 派工/投票 node 按該 node ctx ≥ estPromptTokens 過濾，防止派超 ctx 任務爆 context
-    const estPromptTokens = Math.round(prompt.length / 3.5) + (images.length ? 1024 * images.length : 0);
+    const estPromptTokens = estTok(prompt) + (images.length ? 1024 * images.length : 0);
     // minCtx = 該 model 實際可用 LLM node（cap/tier 匹配）入面最細 ctx。
     // ⚠️ 唔好計 adapter nodes（sd-1/searxng）或唔 match 呢個 model 嘅 node —— 計埋會拖低上限。
     const wantCap = mm.cap || [];
@@ -1638,8 +1642,11 @@ app.post("/v1/chat/completions", async (req, res) => {
     const minCtx = llmCtxOptions.length ? Math.min(...llmCtxOptions) : 65536;
     // swarmai-long：用戶明揀 → 長 prompt（>LONG_THRESHOLD tokens）行 sequential chain（每段 parallel voting）
     // 即使單 node ctx 接得住都拆（長模式 = 保質素 + 串聯長上下文），避免「44k 一個 node 食晒」咁草率。
-    if (mm.long && !useTool && !hasImage && estPromptTokens > Number(process.env.SWARM_LONG_THRESHOLD || 24000)) {
-      return handleOrchLong(req, res, { modelKey, mm, prompt, temperature, max_tokens, stream, stop, reqAcc: reqTok ? accountForToken(reqTok) : null, reqTok, minCtx });
+    if (mm.long && !useTool && !hasImage) {
+      console.log(`[v1] long-check estPromptTokens=${estPromptTokens} threshold=${Number(process.env.SWARM_LONG_THRESHOLD || 24000)} chars=${prompt.length}`);
+      if (estPromptTokens > Number(process.env.SWARM_LONG_THRESHOLD || 24000)) {
+        return handleOrchLong(req, res, { modelKey, mm, prompt, temperature, max_tokens, stream, stop, reqAcc: reqTok ? accountForToken(reqTok) : null, reqTok, minCtx });
+      }
     }
     // swarmai-orch：用戶明揀 + text-only + 超細 ctx → 行拆解派工（唔 413）
     if (mm.orchestrate && !useTool && !hasImage && estPromptTokens > minCtx) {
