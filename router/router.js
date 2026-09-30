@@ -1718,7 +1718,8 @@ function finishOrchestration(res, o) {
 }
 function taskIdSafe() { return crypto.randomUUID().slice(0, 8); }
 
-app.post("/v1/chat/completions", async (req, res) => {
+// OpenAI 兼容 chat completions — 同一 handler serve /v1 /v2 /v3（EA GoldTigerGram callai3 用 /v3）
+const chatCompletionsHandler = async (req, res) => {
   try {
     const { model, messages = [], temperature = 0.6, max_tokens = 512, stream = false, tools, tool_choice, stop } = req.body || {};
     if (!Array.isArray(messages) || messages.length === 0)
@@ -2043,7 +2044,11 @@ app.post("/v1/chat/completions", async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: { message: String(e.message || e).slice(0, 200) }, type: "server_error" });
   }
-});
+};
+
+app.post("/v1/chat/completions", chatCompletionsHandler);
+app.post("/v2/chat/completions", chatCompletionsHandler);
+app.post("/v3/chat/completions", chatCompletionsHandler);
 
 // ---- Specialty gateway: 圖像生成（SD-WebUI/ComfyUI 等 image-gen worker）----
 app.post("/v1/images/generations", async (req, res) => {
