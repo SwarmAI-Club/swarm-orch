@@ -1718,10 +1718,55 @@ function finishOrchestration(res, o) {
 }
 function taskIdSafe() { return crypto.randomUUID().slice(0, 8); }
 
+// ── 自動 web search helper（2026-09-30）：chat prompt 含 <websearch>query</websearch> → 內部 call /v1/search
+// 重用 /v1/search 邏輯（round-robin searxng node + 收費），返回 results_text。失敗 → 空字串（唔阻 main flow）。
+async function performSearch(query, reqAcc, reqTok) {
+  try {
+    const mm = MODEL_MAP["swarmai-search"];
+    let candidates = [...registry.values()].filter(n => n.account && (n.capabilities || []).includes("search"));
+    if (!candidates.length) return "";
+    const sorted = matchCapabilities(mm.cap, candidates, reqAcc).sort((a, b) => b.score - a.score);
+    if (!sorted.length) return "";
+    const rr = (searchRR = (searchRR + 1) % Math.max(1, sorted.length));
+    let target = sorted[rr].node;
+    let estFee = 0;
+    if (reqAcc && reqTok !== NET_TOKEN && !(target.account === reqAcc) && !target.free) {
+      const bal = creditBalance(reqAcc);
+      const hasSelf = sorted.some(x => x.node.account === reqAcc || x.node.free);
+      if (bal >= 1 && !hasSelf) { ledgerBurnChecked(reqAcc, 1, "ws_" + Date.now(), "search_estimate"); estFee = 1; }
+      else { const fb = sorted.find(x => x.node.account === reqAcc || x.node.free); if (fb) target = fb.node; }
+    }
+    const task_id = crypto.randomUUID();
+    const payload = { task_id, adapter: "search", prompt: query, n: 1, max_tokens: 0 };
+    resultsStore.set(task_id, { ts: Date.now(), list: [], est_fee: estFee, units: 1, unit_price: 1, assigned: new Set([target.node_id]) });
+    const assignBody = { ...payload, auth: signAssign(task_id, target.node_id) };
+    if (target.pull || !nodePushAddrOK(target.url)) { const q = inbox.get(target.node_id) || []; q.push(assignBody); inbox.set(target.node_id, q); }
+    else await fetch(`${target.url}/assign`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(assignBody), signal: AbortSignal.timeout(60000) });
+    const deadline = Date.now() + 45000;
+    let rec = resultsStore.get(task_id);
+    while (Date.now() < deadline) {
+      rec = resultsStore.get(task_id);
+      if (rec && rec.list.length) break;
+      await new Promise(r => setTimeout(r, 800));
+    }
+    rec = resultsStore.get(task_id);
+    return (rec?.list || []).map(r => (r.votes?.[0]?.content || "")).filter(Boolean).join("\n");
+  } catch (e) {
+    console.log(`[chat-search] fail: ${e.message}`);
+    return "";
+  }
+}
+
+// 由 prompt 抽出 <websearch>...</websearch> tag 內容；冇 tag → null
+function extractWebsearchQuery(prompt) {
+  const m = String(prompt || "").match(/<websearch>([\s\S]*?)<\/websearch>/);
+  return m ? m[1].trim() : null;
+}
+
 // OpenAI 兼容 chat completions — 同一 handler serve /v1 /v2 /v3（EA GoldTigerGram callai3 用 /v3）
 const chatCompletionsHandler = async (req, res) => {
   try {
-    const { model, messages = [], temperature = 0.6, max_tokens = 512, stream = false, tools, tool_choice, stop } = req.body || {};
+    let { model, messages = [], temperature = 0.6, max_tokens = 512, stream = false, tools, tool_choice, stop } = req.body || {};
     if (!Array.isArray(messages) || messages.length === 0)
       return res.status(400).json({ error: { message: "messages required" }, type: "invalid_request_error" });
     const reqTok = req.get("x-swarm-token") || (req.swarmToken || "");
@@ -1745,7 +1790,28 @@ const chatCompletionsHandler = async (req, res) => {
         });
       }
     }
-    const prompt = useTool ? "" : messagesToPrompt(messages);
+    let prompt = useTool ? "" : messagesToPrompt(messages);
+    // ── 自動 web search（2026-09-30）：prompt 含 <websearch>query</websearch> → 內部 search → 注入 system context
+    // 只對 text/vision 模式做（tool 模式唔 inject，避免干擾 tool schema）
+    let searchContext = "";
+    if (!useTool) {
+      const wq = extractWebsearchQuery(prompt);
+      if (wq) {
+        console.log(`[chat-search] query=${wq.slice(0, 80)}`);
+        searchContext = await performSearch(wq, reqAcc, reqTok);
+        if (searchContext) {
+          console.log(`[chat-search] got ${searchContext.length} chars`);
+          // 注入：喺 messages 最前加 system 訊息（AI 睇到最新資訊）
+          const inject = { role: "system", content: `[WEB SEARCH RESULT for "${wq}"]\n${searchContext}` };
+          messages = [inject, ...messages];
+          // 移除 <websearch> tag（避免 worker 誤解）
+          const joined = JSON.stringify(messages).replace(/<websearch>[\s\S]*?<\/websearch>/g, "");
+          messages = JSON.parse(joined);
+          // text 模式：重新組 prompt（包含 search context）
+          if (!useTool) prompt = messagesToPrompt(messages);
+        }
+      }
+    }
     const images = hasImage ? extractImagesFromMessages(messages) : [];
     // context 防護 v2 (2026-09-30)：
     //  - minCtx 用「實際會派工嘅候選 node」入面最細，唔係全網絡最細
