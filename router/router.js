@@ -184,6 +184,7 @@ const MODEL_MAP = {
   "swarmai-free":     { cap: ["reasoning", "math", "analysis"], tier: ["S", "A", "B", "C"], n_votes: 3, votable: true, strategy: "self-then-free", freeOnly: true, label: "免費節點（完全免費）— 自己機優先，then free nodes" },
   "swarmai-orch":     { cap: ["reasoning", "math", "analysis", "code"], tier: ["S", "A", "B", "C"], n_votes: 1, votable: false, strategy: "self-first", orchestrate: true, label: "長任務拆解 + 分散派工 + 綜合（client node 優先 → free）" },
   "swarmai-long":     { cap: ["reasoning", "math", "analysis", "code"], tier: ["S", "A", "B", "C"], n_votes: 1, votable: false, strategy: "self-first", orchestrate: true, long: true, seg_votes: 2, label: "超長上下文（sequential chaining × 每段 parallel 投票）：拆 N 段，每段多 node 投票提質，段間接力（64k×N）" },
+  "swarmai-long-p":   { cap: ["reasoning", "math", "analysis", "code"], tier: ["S", "A", "B", "C"], n_votes: 1, votable: false, strategy: "self-first", orchestrate: true, long: true, parallel: true, seg_votes: 1, label: "超長上下文（parallel shard）：拆 N 段，每段派唔同 node 同時處理（round-robin 平衡），最後綜合 — 快，唔投票" },
   "swarmai-image":    { cap: ["image-gen"], tier: ["A", "B", "C"], n_votes: 1, votable: false, strategy: "fastest", unit: true, unitPer: "job", unitPrice: IMAGE_UNIT_PRICE, max_units: 4, label: "圖像生成（SD/ComfyUI）" },
   "swarmai-video":    { cap: ["video-gen"], tier: ["A", "B", "C"], n_votes: 1, votable: false, strategy: "fastest", unit: true, unitPer: "job", unitPrice: VIDEO_UNIT_PRICE, max_units: 8, label: "視訊生成（Wan）" },
   "swarmai-search":   { cap: ["search"], tier: ["A", "B", "C"], n_votes: 1, votable: false, strategy: "fastest", unit: true, unitPer: "query", unitPrice: 1, max_units: 1, hidden: true, label: "Web Search（searxng node）" },
@@ -1563,6 +1564,128 @@ async function handleOrchLong(req, res, opts) {
   return finishOrchestration(res, { modelKey, task_id: "long-chain", prompt, content: sendSSE ? "" : finalContent, contentStreamed: sendSSE, estFee, dispatchMode, nodes_used: allNodes, stream, stop, sseStarted: sendSSE, tin: tinTotal, tout: toutTotal });
 }
 
+// ---- swarmai-long-p: parallel shard ----
+// 長 prompt 拆 N 段 → 每段派去唔同 node（round-robin 平衡）→ 同時處理（parallel）→
+// 每段單 node（seg_votes=1，唔投票）→ 收齊綜合（輕量：每段答案組合成連貫文）。
+// 同 sequential 分別：段與段冇接力（冇跨段 context），但快（同時派）+ 平衡用唔同機。
+async function handleOrchParallel(req, res, opts) {
+  const { modelKey, mm, prompt, temperature, max_tokens, stream, stop, reqAcc, reqTok, minCtx } = opts;
+  const topTier = mm.tier && mm.tier.length ? mm.tier[0] : "B";
+  const sendSSE = stream && !res.headersSent;
+
+  let candidates = [...registry.values()].filter(n => n.account && (mm.tier.includes(nodeTier(n)) || n.free));
+  if (!candidates.length) candidates = [...registry.values()].filter(n => n.account);
+  const scored = matchCapabilities(mm.cap, candidates, reqAcc).sort((a, b) => b.score - a.score);
+  if (!scored.length) return res.status(503).json({ error: { message: "no available worker" }, type: "server_error" });
+
+  const clientNodes = scored.filter(s => s.node.account === reqAcc);
+  const freeNodes = scored.filter(s => s.node.free);
+  const paidNodes = scored.filter(s => s.node.account !== reqAcc && !s.node.free);
+  const preferred = [...clientNodes, ...freeNodes, ...paidNodes];
+  if (!preferred.length) return res.status(503).json({ error: { message: "no available worker" }, type: "server_error" });
+
+  const ctxLow = Math.min(...scored.map(s => s.node.max_context || minCtx));
+  const segChars = Math.min(Math.floor(ctxLow * 0.75 * 3.5), Number(process.env.SWARM_LONG_SEG_MAX || 120000));
+  const { chunks, k } = decomposePrompt(prompt, segChars, Number(process.env.SWARM_LONG_MAX_SEG || 6));
+  if (k <= 1) return handleOrchestration(req, res, opts);
+
+  const dispatchPayload = (t, node) => {
+    const body = { ...t, auth: signAssign(t.task_id, node.node_id) };
+    if (node.pull || !nodePushAddrOK(node.url)) { const q = inbox.get(node.node_id) || []; q.push(body); inbox.set(node.node_id, q); }
+    else return fetch(`${node.url}/assign`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(150000) });
+  };
+  const waitResult = async (task_id, timeoutMs) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const rec = resultsStore.get(task_id);
+      if (rec && rec.list && rec.list.length) return rec;
+      await new Promise(r => setTimeout(r, 400));
+    }
+    return resultsStore.get(task_id);
+  };
+
+  const allSelf = preferred.every(s => s.node.account === reqAcc || s.node.free || !reqAcc);
+  let dispatchMode = "self";
+  let estFee = 0;
+  if (reqAcc && reqTok !== NET_TOKEN && !allSelf) {
+    const estIn = estTok(prompt);
+    const estOut = max_tokens * k;
+    estFee = tokensToCredit(estIn, estOut, tierCharge(topTier));
+    const fallback = preferred.filter(s => s.node.account === reqAcc || s.node.free);
+    if (creditBalance(reqAcc) < estFee || estFee > dailyQuotaRemaining(reqAcc)) {
+      if (fallback.length) { dispatchMode = "fallback"; estFee = 0; }
+      else return res.status(402).json({ error: { message: `SWAI 餘額不足 (need ${estFee})`, type: "insufficient_balance" } });
+    } else { ledgerBurnChecked(reqAcc, estFee, null, "longp_estimate"); dispatchMode = "paid"; }
+  }
+
+  if (sendSSE) {
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders?.();
+    sseChunk(res, { choices: [{ index: 0, delta: { content: "" }, finish_reason: null }], swarm_progress: { stage: "shard", total: k, done: 0, message: `已拆成 ${k} 段，同時派去 ${Math.min(k, preferred.length)} 部機處理中…` } });
+  }
+
+  // 揀 k 個唔同 node（round-robin 平衡，idle-first）：
+  // 優先 IDLE_SHARING / free（瞓緊 share 出嚟）node —— 唔好用 USER_OCCUPIED（忙緊）node，避免等慢機。
+  const idleFirst = [...clientNodes, ...freeNodes, ...paidNodes]
+    .sort((a, b) => {
+      const ia = a.node.last_status?.status === 'IDLE_SHARING' || a.node.free ? 0 : 1;
+      const ib = b.node.last_status?.status === 'IDLE_SHARING' || b.node.free ? 0 : 1;
+      return ia - ib || (parseFloat(b.node.speed) || 0) - (parseFloat(a.node.speed) || 0);
+    })
+    .map(s => s.node);
+  const unique = [];
+  const seen = new Set();
+  for (const n of idleFirst) { if (!seen.has(n.node_id)) { seen.add(n.node_id); unique.push(n); } }
+  const nodePool = unique.length >= k ? unique : unique.concat(Array(Math.max(0, k - unique.length)).fill(unique[unique.length - 1]));
+  console.log(`[longp] k=${k} nodes=${nodePool.slice(0, k).map(n => n.node_id).join(",")} mode=${dispatchMode}`);
+
+  // 全部段同時 dispatch
+  const tasks = [];
+  for (let i = 0; i < k; i++) {
+    const node = nodePool[i % nodePool.length];
+    const segPrompt = `你係處理超長文件嘅 AI，依家處理第 ${i + 1}/${k} 段。請完整處理以下內容並輸出你嘅分析：\n\n${chunks[i]}`;
+    const task_id = crypto.randomUUID();
+    const payload = { task_id, beacon_id: crypto.randomUUID(), prompt: segPrompt, n_votes: 1, temperature, max_tokens, stop: stop || undefined };
+    resultsStore.set(task_id, { ts: Date.now(), list: [], est_fee: 0, est_tokens_in: estTok(segPrompt), est_tokens_out: max_tokens, assigned: new Set([node.node_id]), longp_parent: true });
+    tasks.push({ task_id, node });
+    try { await dispatchPayload(payload, node); } catch (e) { console.log(`[longp] dispatch fail ${node.node_id}: ${e.message}`); }
+  }
+
+  // 收齊（同時等，唔係逐個順序）
+  const partials = new Array(k).fill(null);
+  const gotNodes = new Array(k).fill(null);
+  const deadline = Date.now() + 180000;
+  let tinTotal = 0, toutTotal = 0;
+  while (Date.now() < deadline && partials.some(p => p === null)) {
+    for (let i = 0; i < k; i++) {
+      if (partials[i] !== null) continue;
+      const rec = resultsStore.get(tasks[i].task_id);
+      if (rec && rec.list && rec.list.length) {
+        const nodeResult = rec.list[rec.list.length - 1];
+        const votes = nodeResult.votes || [];
+        const content = votes.map(v => String(v.content || "")).filter(Boolean).join("\n");
+        partials[i] = content || "(無結果)";
+        gotNodes[i] = nodeResult.node_id;
+        tinTotal += nodeResult.tokens_in || 0; toutTotal += nodeResult.tokens_out || 0;
+        if (sendSSE) {
+          const done = partials.filter(p => p !== null).length;
+          sseChunk(res, { choices: [{ index: 0, delta: { content: "\n\n===== 段 " + (i + 1) + " =====\n" + (content || "") }, finish_reason: null }], swarm_progress: { stage: "shard", total: k, done, result_nodes: gotNodes.filter(Boolean) } });
+        }
+        console.log(`[longp] seg ${i + 1}/${k} ✓ ${nodeResult.node_id} len=${(content || "").length}`);
+      }
+    }
+    await new Promise(r => setTimeout(r, 400));
+  }
+
+  // 綜合（輕量）：每段答案標題 + 內容順序拼埋
+  const finalContent = partials.map((p, i) => p && p !== "(無結果)" ? `【第 ${i + 1} 段】\n${p}` : `【第 ${i + 1} 段】\n(無結果)`).join("\n\n");
+  const allNodes = [...new Set(gotNodes.filter(Boolean))];
+  if (sendSSE) sseChunk(res, { choices: [{ index: 0, delta: {}, finish_reason: null }], swarm_progress: { stage: "done", total: k, done: k, message: "✅ 完成" } });
+  return finishOrchestration(res, { modelKey, task_id: "longp-shard", prompt, content: sendSSE ? "" : finalContent, contentStreamed: sendSSE, estFee, dispatchMode, nodes_used: allNodes, stream, stop, sseStarted: sendSSE, tin: tinTotal, tout: toutTotal });
+}
+
 // 包裝最終 response（共用 stream / non-stream）
 // o.sseStarted：SSE headers 已開（orchestrator 已 send 過 progress events）→ 直接 append final + [DONE]
 function finishOrchestration(res, o) {
@@ -1643,8 +1766,11 @@ app.post("/v1/chat/completions", async (req, res) => {
     // swarmai-long：用戶明揀 → 長 prompt（>LONG_THRESHOLD tokens）行 sequential chain（每段 parallel voting）
     // 即使單 node ctx 接得住都拆（長模式 = 保質素 + 串聯長上下文），避免「44k 一個 node 食晒」咁草率。
     if (mm.long && !useTool && !hasImage) {
-      console.log(`[v1] long-check estPromptTokens=${estPromptTokens} threshold=${Number(process.env.SWARM_LONG_THRESHOLD || 24000)} chars=${prompt.length}`);
+      console.log(`[v1] long-check estPromptTokens=${estPromptTokens} threshold=${Number(process.env.SWARM_LONG_THRESHOLD || 24000)} chars=${prompt.length} parallel=${!!mm.parallel}`);
       if (estPromptTokens > Number(process.env.SWARM_LONG_THRESHOLD || 24000)) {
+        if (mm.parallel) {
+          return handleOrchParallel(req, res, { modelKey, mm, prompt, temperature, max_tokens, stream, stop, reqAcc: reqTok ? accountForToken(reqTok) : null, reqTok, minCtx });
+        }
         return handleOrchLong(req, res, { modelKey, mm, prompt, temperature, max_tokens, stream, stop, reqAcc: reqTok ? accountForToken(reqTok) : null, reqTok, minCtx });
       }
     }
