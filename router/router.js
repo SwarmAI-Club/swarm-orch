@@ -1523,7 +1523,9 @@ app.post("/v1/chat/completions", async (req, res) => {
     // ✅ Dispatch by model strategy (no user dispatch_pref needed)
     // text 模式: 派 n_votes 個 node 做 weighted voting (swarm 智慧核心)
     // tool 模式: 要一致 tool_calls → 單 node
-    const nTargets = useTool ? 1 : Math.max(1, Math.min(mm.n_votes || 1, sorted.length));
+    // 投票數可調: SWARM_MAX_VOTES (env) 全局上限；MODEL_MAP.n_votes per-model；冇 idle node 自動減
+    const MAX_VOTES = Number(process.env.SWARM_MAX_VOTES || 3);
+    const nTargets = useTool ? 1 : Math.max(1, Math.min(mm.n_votes || 1, MAX_VOTES, sorted.length));
     let target = null;
     
     if (mm.strategy === "fastest") {
@@ -1563,15 +1565,27 @@ app.post("/v1/chat/completions", async (req, res) => {
     }
     
     let targets = [target];
-    // 多 node voting (text 模式): 揀頭 nTargets 個唔重複 node（質素分排序後）
+    // 多 node voting (text 模式):
+    //  A) 投票 node 優先揀「閒緊」node（IDLE_SHARING share 中 / free）—— 唔好霸住 USER_OCCUPIED（自己醒緊用緊）node，
+    //     否則自用投票會搶走嗰啲 node 日間產能，令 idle share 收入下降。
+    //  B) 投票數可調：冇足夠閒 node → 少投啲；得 1 個 → 單 node 自用（唔硬投）。
     if (nTargets > 1) {
-      const chosen = new Set([target.node_id]);
-      for (const s of sorted) {
-        if (chosen.size >= nTargets) break;
-        if (!chosen.has(s.node.node_id)) chosen.add(s.node.node_id);
+      const votePool = sorted.filter(s => {
+        const st = s.node.last_status?.status;
+        return st === 'IDLE_SHARING' || s.node.free;
+      });
+      if (votePool.length >= 2) {
+        const nVote = Math.min(nTargets, votePool.length);
+        const chosen = new Set();
+        for (const s of votePool) {
+          if (chosen.size >= nVote) break;
+          chosen.add(s.node.node_id);
+        }
+        targets = [...chosen].map(id => sorted.find(s => s.node.node_id === id)?.node).filter(Boolean);
+        console.log(`[v1] VOTE targets=${targets.map(t=>t.node_id).join(",")} (n=${nVote}, pool=${votePool.length}, idle-first)`);
+      } else {
+        console.log(`[v1] VOTE skip: only ${votePool.length} idle node(s), single dispatch to ${target?.node_id}`);
       }
-      targets = [...chosen].map(id => sorted.find(s => s.node.node_id === id)?.node).filter(Boolean);
-      console.log(`[v1] VOTE targets=${targets.map(t=>t.node_id).join(",")} (n=${nTargets})`);
     }
     // 收費決定：
     //  - 全部自己機 → self（唔 burn）
