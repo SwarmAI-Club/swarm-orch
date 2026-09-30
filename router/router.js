@@ -182,9 +182,8 @@ const MODEL_MAP = {
   "swarmai-normal":   { cap: ["reasoning", "math"], tier: ["B", "C"], n_votes: 3, votable: true, strategy: "self-first", label: "日常平價（省錢）— 自己機優先 B/C tier" },
   "swarmai-vision": { cap: ["vision"], tier: ["S", "A", "B", "C"], n_votes: 1, votable: false, strategy: "vision-first", vision: true, hidden: true, label: "Vision (auto-route, 質素優先)" },
   "swarmai-free":     { cap: ["reasoning", "math", "analysis"], tier: ["S", "A", "B", "C"], n_votes: 3, votable: true, strategy: "self-then-free", freeOnly: true, label: "免費節點（完全免費）— 自己機優先，then free nodes" },
-  "swarmai-orch":     { cap: ["reasoning", "math", "analysis", "code"], tier: ["S", "A", "B", "C"], n_votes: 1, votable: false, strategy: "self-first", orchestrate: true, label: "長任務拆解 + 分散派工 + 綜合（client node 優先 → free）" },
+  "swarmai-orch":     { cap: ["reasoning", "math", "analysis", "code"], tier: ["S", "A", "B", "C"], n_votes: 1, votable: false, strategy: "self-first", orchestrate: true, long: true, parallel: true, seg_votes: 1, label: "長任務拆解協作（parallel shard）：長 prompt 拆 N 段，每段派唔同 node（idle-first 平衡）同時處理，最後綜合 — 快，唔投票" },
   "swarmai-long":     { cap: ["reasoning", "math", "analysis", "code"], tier: ["S", "A", "B", "C"], n_votes: 1, votable: false, strategy: "self-first", orchestrate: true, long: true, seg_votes: 2, label: "超長上下文（sequential chaining × 每段 parallel 投票）：拆 N 段，每段多 node 投票提質，段間接力（64k×N）" },
-  "swarmai-long-p":   { cap: ["reasoning", "math", "analysis", "code"], tier: ["S", "A", "B", "C"], n_votes: 1, votable: false, strategy: "self-first", orchestrate: true, long: true, parallel: true, seg_votes: 1, label: "超長上下文（parallel shard）：拆 N 段，每段派唔同 node 同時處理（round-robin 平衡），最後綜合 — 快，唔投票" },
   "swarmai-image":    { cap: ["image-gen"], tier: ["A", "B", "C"], n_votes: 1, votable: false, strategy: "fastest", unit: true, unitPer: "job", unitPrice: IMAGE_UNIT_PRICE, max_units: 4, label: "圖像生成（SD/ComfyUI）" },
   "swarmai-video":    { cap: ["video-gen"], tier: ["A", "B", "C"], n_votes: 1, votable: false, strategy: "fastest", unit: true, unitPer: "job", unitPrice: VIDEO_UNIT_PRICE, max_units: 8, label: "視訊生成（Wan）" },
   "swarmai-search":   { cap: ["search"], tier: ["A", "B", "C"], n_votes: 1, votable: false, strategy: "fastest", unit: true, unitPer: "query", unitPrice: 1, max_units: 1, hidden: true, label: "Web Search（searxng node）" },
@@ -1763,8 +1762,9 @@ app.post("/v1/chat/completions", async (req, res) => {
         (n.capabilities || []).some(c => ['reasoning','math','analysis','vision'].includes(c)))
       .map(n => n.max_context);
     const minCtx = llmCtxOptions.length ? Math.min(...llmCtxOptions) : 65536;
-    // swarmai-long：用戶明揀 → 長 prompt（>LONG_THRESHOLD tokens）行 sequential chain（每段 parallel voting）
-    // 即使單 node ctx 接得住都拆（長模式 = 保質素 + 串聯長上下文），避免「44k 一個 node 食晒」咁草率。
+    // 長文模式（swarmai-orch 同 swarmai-long 都 long=true）：
+    //  - orch（parallel=true）→ handleOrchParallel（拆大段同時派唔同 node，快，唔投票）
+    //  - long（parallel=false）→ handleOrchLong（sequential 接力 + 每段投票，連貫 + 質素）
     if (mm.long && !useTool && !hasImage) {
       console.log(`[v1] long-check estPromptTokens=${estPromptTokens} threshold=${Number(process.env.SWARM_LONG_THRESHOLD || 24000)} chars=${prompt.length} parallel=${!!mm.parallel}`);
       if (estPromptTokens > Number(process.env.SWARM_LONG_THRESHOLD || 24000)) {
@@ -1774,10 +1774,7 @@ app.post("/v1/chat/completions", async (req, res) => {
         return handleOrchLong(req, res, { modelKey, mm, prompt, temperature, max_tokens, stream, stop, reqAcc: reqTok ? accountForToken(reqTok) : null, reqTok, minCtx });
       }
     }
-    // swarmai-orch：用戶明揀 + text-only + 超細 ctx → 行拆解派工（唔 413）
-    if (mm.orchestrate && !useTool && !hasImage && estPromptTokens > minCtx) {
-      return handleOrchestration(req, res, { modelKey, mm, prompt, temperature, max_tokens, stream, stop, reqAcc: reqTok ? accountForToken(reqTok) : null, reqTok, minCtx });
-    }
+    // 唔係長模式 / prompt 唔夠長 → 一般 dispatch（投票）或者 413
     if (!useTool && estPromptTokens > minCtx) {
       return res.status(413).json({ error: { message: `prompt 太大（~${estPromptTokens} tokens，網絡上限 ${minCtx}）——建議開新 context/縮短對話`, type: "context_length_exceeded" }, type: "context_length_exceeded" });
     }
