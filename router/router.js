@@ -175,10 +175,10 @@ function recipePut(account, hash, question, answer, model) {
 // ---- Logical model map (OpenAI gateway) ----
 // 對外 model ID → 派工群組 + tier 收費倍率
 const MODEL_MAP = {
-  "swarmai-fast":     { cap: ["reasoning", "analysis"], tier: ["S", "A"], n_votes: 1, votable: true, strategy: "fastest", label: "勁機優先（極速）— 最快 S/A tier GPU" },
-  "swarmai-normal":   { cap: ["reasoning", "math"], tier: ["B", "C"], n_votes: 1, votable: true, strategy: "self-first", label: "日常平價（省錢）— 自己機優先 B/C tier" },
+  "swarmai-fast":     { cap: ["reasoning", "analysis"], tier: ["S", "A"], n_votes: 3, votable: true, strategy: "fastest", label: "勁機優先（極速）— 最快 S/A tier GPU" },
+  "swarmai-normal":   { cap: ["reasoning", "math"], tier: ["B", "C"], n_votes: 3, votable: true, strategy: "self-first", label: "日常平價（省錢）— 自己機優先 B/C tier" },
   "swarmai-vision": { cap: ["vision"], tier: ["S", "A", "B", "C"], n_votes: 1, votable: false, strategy: "vision-first", vision: true, hidden: true, label: "Vision (auto-route, 質素優先)" },
-  "swarmai-free":     { cap: ["reasoning", "math", "analysis"], tier: ["S", "A", "B", "C"], n_votes: 1, votable: true, strategy: "self-then-free", freeOnly: true, label: "免費節點（完全免費）— 自己機優先，then free nodes" },
+  "swarmai-free":     { cap: ["reasoning", "math", "analysis"], tier: ["S", "A", "B", "C"], n_votes: 3, votable: true, strategy: "self-then-free", freeOnly: true, label: "免費節點（完全免費）— 自己機優先，then free nodes" },
   "swarmai-orch":     { cap: ["reasoning", "math", "analysis", "code"], tier: ["S", "A", "B", "C"], n_votes: 1, votable: false, strategy: "self-first", orchestrate: true, label: "長任務拆解 + 分散派工 + 綜合（client node 優先 → free）" },
   "swarmai-image":    { cap: ["image-gen"], tier: ["A", "B", "C"], n_votes: 1, votable: false, strategy: "fastest", unit: true, unitPer: "job", unitPrice: IMAGE_UNIT_PRICE, max_units: 4, label: "圖像生成（SD/ComfyUI）" },
   "swarmai-video":    { cap: ["video-gen"], tier: ["A", "B", "C"], n_votes: 1, votable: false, strategy: "fastest", unit: true, unitPer: "job", unitPrice: VIDEO_UNIT_PRICE, max_units: 8, label: "視訊生成（Wan）" },
@@ -550,16 +550,21 @@ function nodeLastSeenMin(n) {
 }
 
 // ---- Availability Check (7 filters) ----
-function nodeAvailable(n) {
+function nodeAvailable(n, reqAcc) {
   if (!n || !n.node_id) return false;
   if (nodeRemoved(n.node_id)) return false;      // ① Removed
   if (nodeSuspended(n.node_id)) return false;    // ② Suspended
   if (!nodeOnline(n)) return false;              // ③ Offline (>5min since heartbeat)
-  
+
+  const isMine = reqAcc && n.account === reqAcc;
+  // 自己機優先：自己用自己 node 24/7 都得，唔受 sleep window / busy 限制
+  // （share 出去俾人先跟 sleep window + slots）
+  if (isMine) return true;
+
   const status = n.last_status?.status;
   if (status === 'USER_OCCUPIED') return false;  // ④ Non-sleep time
   if (status === 'BUSY') return false;           // ⑤ All slots busy
-  
+
   return true;  // ⑥ Capabilities ⑦ Score > 0 (handled in matchCapabilities)
 }
 
@@ -604,7 +609,7 @@ function dispatchPrefFor(email) {
 function matchCapabilities(required, candidates, reqAcc) {
   return candidates
     .filter(n => Array.isArray(n.capabilities))
-    .filter(n => nodeAvailable(n))  // ← Use new unified filter (7 checks)
+    .filter(n => nodeAvailable(n, reqAcc))  // ← Use new unified filter (7 checks), 自己 node 24/7
     .map(n => {
       const base = jaccard(required, n.capabilities);
       const ov = nodeShareOverride(n.node_id);
@@ -675,6 +680,11 @@ app.post("/status", (req, res) => {
     // 真正 SSRF 防線喺 dispatch 度 nodePushAddrOK()：router 只會 push 去 BIND hosts，非 BIND 照 inbox。
     n.pull = (own && own.account === acc) ? !!req.body.pull : true;
     registry.set(node_id, n);
+    // 修正 2026-09-30：status auto-register 後 probe abilities（唔係淨 register 先 probe），
+    // 否則 tool 模式（opencode 用）揀唔到 node
+    if (req.body.completion && !n.abilities) {
+      probeAbilities(req.body.completion).then(a => { n.abilities = a; if (a.ctx) n.max_context = a.ctx; }).catch(() => {});
+    }
     console.log(`[status→reg] ${node_id} (${acc}), pull=${n.pull}`);
   }
   if (n) {
@@ -687,7 +697,10 @@ app.post("/status", (req, res) => {
     if (req.body.share_ratio !== undefined) n.share_ratio = req.body.share_ratio;
     if (req.body.url) n.url = req.body.url;
     // 安全審計 H1：free flag 唔可以喺心跳任意覆寫（只有 DB owner 設定 / register 初次設定先算數）
-    if (req.body.free !== undefined && !nodeSettingFree(node_id) && !n.free_manual) n.free = !!req.body.free;
+    // 修正 2026-09-30：DB 已設 free 但 n.free 未初始化（status auto-register 無 default）→ free 保持 None bug
+    const dbFree = nodeSettingFree(node_id);
+    if (dbFree) n.free = true;
+    else if (req.body.free !== undefined && !n.free_manual) n.free = !!req.body.free;
     if (req.body.abilities) n.abilities = req.body.abilities;
     if (req.body.vram_used_gb) n.vram_used_gb = req.body.vram_used_gb;
     
@@ -1508,7 +1521,9 @@ app.post("/v1/chat/completions", async (req, res) => {
     console.log(`[v1] sorted=${sorted.map(s=>s.node.node_id+":"+s.score.toFixed(2)).join(",")}`);
     
     // ✅ Dispatch by model strategy (no user dispatch_pref needed)
-    const nTargets = useTool ? 1 : Math.max(1, mm.n_votes);
+    // text 模式: 派 n_votes 個 node 做 weighted voting (swarm 智慧核心)
+    // tool 模式: 要一致 tool_calls → 單 node
+    const nTargets = useTool ? 1 : Math.max(1, Math.min(mm.n_votes || 1, sorted.length));
     let target = null;
     
     if (mm.strategy === "fastest") {
@@ -1547,7 +1562,17 @@ app.post("/v1/chat/completions", async (req, res) => {
       return res.status(503).json({ error: { message: "no available worker" }, type: "server_error" });
     }
     
-    let targets = [target];  // Single dispatch (n_votes=1)
+    let targets = [target];
+    // 多 node voting (text 模式): 揀頭 nTargets 個唔重複 node（質素分排序後）
+    if (nTargets > 1) {
+      const chosen = new Set([target.node_id]);
+      for (const s of sorted) {
+        if (chosen.size >= nTargets) break;
+        if (!chosen.has(s.node.node_id)) chosen.add(s.node.node_id);
+      }
+      targets = [...chosen].map(id => sorted.find(s => s.node.node_id === id)?.node).filter(Boolean);
+      console.log(`[v1] VOTE targets=${targets.map(t=>t.node_id).join(",")} (n=${nTargets})`);
+    }
     // 收費決定：
     //  - 全部自己機 → self（唔 burn）
     //  - 有 free node 參與（或 freeOnly model）→ free（唔 burn）
@@ -1646,11 +1671,12 @@ app.post("/v1/chat/completions", async (req, res) => {
         p.push(node.node_id);
       } catch (e) { /* 單一等 */ }
     }
-    // 等結果：快返（≥1 result 即出，唔等齊）；上限 25s（OpenAI 兼容要 reasonable latency）
-    const deadline = Date.now() + 25000;
+    // 等結果：text 投票等齊 nTargets（或 timeout 25s）；tool 快返（≥1 result）
+    const deadline = Date.now() + (nTargets > 1 ? 40000 : 25000);
+    const waitForAll = nTargets > 1;
     while (Date.now() < deadline) {
       const cur = resultsStore.get(task_id);
-      if (cur && cur.list && cur.list.length >= 1) break;
+      if (cur && cur.list && (waitForAll ? cur.list.length >= nTargets : cur.list.length >= 1)) break;
       await new Promise(r => setTimeout(r, 300));
     }
     const rec = resultsStore.get(task_id);

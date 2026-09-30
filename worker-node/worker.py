@@ -395,6 +395,8 @@ class Worker:
                 "free": bool(getattr(self.args, "free", False)),
                 "max_context": self.args.max_context,
                 "pull": self.args.pull,
+                # 2026-09-30: 心跳帶 completion，令 status auto-register 可 probe abilities (tool/vision)
+                "completion": self.args.completion,
             }, headers=_headers(self.args), timeout=10)
             # router 重啟後（registry 空 / 未註冊）→ 自動補完整 /register
             if r.status_code in (401, 404) or r.json().get("ok") is False:
