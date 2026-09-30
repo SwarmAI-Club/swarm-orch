@@ -1493,7 +1493,8 @@ async function handleOrchLong(req, res, opts) {
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
     res.flushHeaders?.();
-    sseChunk(res, { choices: [{ index: 0, delta: {}, finish_reason: null }], swarm_progress: { stage: "chain", total: k, done: 0, seg_votes: segVotes } });
+    // 開場即話俾用戶知進度結構（feel-good：一有 request 即刻見到「做緊嘢」）
+    sseChunk(res, { choices: [{ index: 0, delta: { content: "" }, finish_reason: null }], swarm_progress: { stage: "chain", total: k, done: 0, seg_votes: segVotes, message: `已拆成 ${k} 段，每段 ${segVotes} 個 AI 同時處理，逐段接力中…` } });
   }
 
   // sequential chain：accumulator 係「前面所有段嘅摘要」
@@ -1539,15 +1540,23 @@ async function handleOrchLong(req, res, opts) {
     for (const r of recs) { for (const rr of r.list) { tinTotal += rr.tokens_in || 0; toutTotal += rr.tokens_out || 0; } }
     // sequential：呢段答案摘要入 accumulator（截到 segChars 上限，控制下段 prompt）
     acc = segAnswer.length > segChars ? segAnswer.slice(0, segChars) : segAnswer;
-    if (sendSSE) sseChunk(res, { choices: [{ index: 0, delta: {}, finish_reason: null }], swarm_progress: { stage: "chain", total: k, done: i + 1, seg: i + 1, result_nodes: targets.map(t => t.node_id) } });
+    if (sendSSE) {
+      // 每段完成即時 stream 出嚟（feel-good：用戶逐步見到答案，唔使等晒先出）
+      if (segAnswer && segAnswer !== "(無結果)") {
+        sseChunk(res, { choices: [{ index: 0, delta: { content: segAnswer + "\n" }, finish_reason: null }], swarm_progress: { stage: "chain", total: k, done: i + 1, seg: i + 1, result_nodes: targets.map(t => t.node_id) } });
+      } else {
+        sseChunk(res, { choices: [{ index: 0, delta: {}, finish_reason: null }], swarm_progress: { stage: "chain", total: k, done: i + 1, seg: i + 1, result_nodes: targets.map(t => t.node_id) } });
+      }
+    }
     console.log(`[long] seg ${i + 1}/${k} ✓ ${targets.map(t => t.node_id).join(",")} vote=${segVotes} ansLen=${segAnswer.length}`);
   }
 
   // 最終：將最後 acc 作為答案（已含全部段落接力）
   const finalContent = acc || "(無結果)";
   const allNodes = [...usedNodes];
-  if (sendSSE) sseChunk(res, { choices: [{ index: 0, delta: {}, finish_reason: null }], swarm_progress: { stage: "done", total: k, done: k } });
-  return finishOrchestration(res, { modelKey, task_id: "long-chain", prompt, content: finalContent, estFee, dispatchMode, nodes_used: allNodes, stream, stop, sseStarted: sendSSE, tin: tinTotal, tout: toutTotal });
+  if (sendSSE) sseChunk(res, { choices: [{ index: 0, delta: {}, finish_reason: null }], swarm_progress: { stage: "done", total: k, done: k, message: "✅ 完成" } });
+  // 已逐步 stream 過每段 → 最後唔好重複成段 content（只 send finish reason）
+  return finishOrchestration(res, { modelKey, task_id: "long-chain", prompt, content: "", contentStreamed: sendSSE, estFee, dispatchMode, nodes_used: allNodes, stream, stop, sseStarted: sendSSE, tin: tinTotal, tout: toutTotal });
 }
 
 // 包裝最終 response（共用 stream / non-stream）
@@ -1564,7 +1573,10 @@ function finishOrchestration(res, o) {
       res.flushHeaders?.();
     }
     const base = { id: o.task_id, object: "chat.completion.chunk", created, model: o.modelKey };
-    sseChunk(res, { ...base, choices: [{ index: 0, delta: { role: "assistant", content: winner }, finish_reason: null }], swarmai: st });
+    // 內容已逐步 stream（如 long chain）→ 唔重複，只 send finish
+    if (!o.contentStreamed && winner) {
+      sseChunk(res, { ...base, choices: [{ index: 0, delta: { role: "assistant", content: winner }, finish_reason: null }], swarmai: st });
+    }
     sseChunk(res, { ...base, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] });
     sseChunk(res, { ...base, choices: [], usage: { prompt_tokens: Math.round(o.prompt.length / 3.5), completion_tokens: o.tout, total_tokens: Math.round(o.prompt.length / 3.5) + o.tout } });
     res.write("data: [DONE]\n\n");
