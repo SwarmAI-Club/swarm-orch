@@ -92,7 +92,9 @@ def llm_complete(completion_url, prompt, n_predict=512, temperature=0.6, image_d
     }
     if image_data:
         body["image_data"] = image_data if isinstance(image_data, list) else [{"data": image_data}]
+    print(f"[worker] llm_complete start url={completion_url} prompt_len={len(str(prompt))}", file=sys.stderr, flush=True)
     r = requests.post(completion_url, json=body, timeout=300)
+    print(f"[worker] llm_complete done http={r.status_code} len={len(r.text)}", file=sys.stderr, flush=True)
     r.raise_for_status()
     j = r.json()
     content = str(j.get("content", "")).strip()
@@ -274,7 +276,8 @@ class Worker:
             "tokens_in": tokens_in_total, "tokens_out": tokens_out_total,
         }
         try:
-            requests.post(self.args.router.rstrip("/") + "/result", json=payload, headers=_headers(self.args), timeout=20)
+            r2 = requests.post(self.args.router.rstrip("/") + "/result", json=payload, headers=_headers(self.args), timeout=20)
+            print(f"[worker] result post http={r2.status_code} task={body.get('task_id')}", file=sys.stderr, flush=True)
         except Exception as e:
             print(f"[worker] result post FAIL: {e}", file=sys.stderr)
         return {"ok": True, "votes": len(votes), "node_id": self.args.node_id}
@@ -435,13 +438,17 @@ def make_handler(worker):
                 if self.path.startswith("/beacon"):
                     self._json(worker.on_beacon(body))
                 elif self.path.startswith("/assign"):
+                    print(f"[worker] /assign task_id={body.get('task_id','?')} prompt_len={len(body.get('prompt','') or '')} node={worker.args.node_id}", file=sys.stderr, flush=True)
                     if not _assign_valid(worker, body):
+                        print(f"[worker] /assign AUTH FAIL {body.get('task_id')}", file=sys.stderr, flush=True)
                         self._json({"ok": False, "error": "invalid assign auth"}, 403)
                         return
+                    print(f"[worker] /assign AUTH OK → on_assign {body.get('task_id')}", file=sys.stderr, flush=True)
                     self._json(worker.on_assign(body))
                 else:
                     self._json({"ok": False}, 404)
             except Exception as e:
+                print(f"[worker] do_POST ERR {e}", file=sys.stderr, flush=True)
                 self._json({"ok": False, "error": str(e)}, 500)
 
     return H

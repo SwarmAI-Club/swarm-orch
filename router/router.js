@@ -796,6 +796,7 @@ app.post("/result", (req, res) => {
   if (!rec || !rec.assigned || !rec.assigned.has(node_id))
     return res.status(403).json({ ok: false, error: "task 未指派俾呢個 node" });
   rec.list.push({ node_id, votes: votes || [], duration_ms: duration_ms || 0, tokens_in: tokens_in || 0, tokens_out: tokens_out || 0, images: images || [], units: units || 0, ts: Date.now() });
+  console.log(`[result] task=${String(task_id).slice(0,8)} node=${node_id} rec.list=${rec.list.length}/${rec.assigned?.size || '?'}`);
   
   // ✅ Rating vote: 收齊 3 個 responses → 比較 quality → update ratings
   if (rec.is_rating_vote && rec.vote_candidates && rec.list.length >= rec.vote_candidates.length) {
@@ -1921,6 +1922,7 @@ const chatCompletionsHandler = async (req, res) => {
         const st = s.node.last_status?.status;
         return st === 'IDLE_SHARING' || s.node.free;
       });
+      console.log(`[v1] votePool=${votePool.map(s=>s.node.node_id+":"+(s.node.last_status?.status||'?')+":"+(s.node.free?'F':'')).join(",")}`);
       if (votePool.length >= 2) {
         const nVote = Math.min(nTargets, votePool.length);
         const chosen = new Set();
@@ -2030,7 +2032,7 @@ const chatCompletionsHandler = async (req, res) => {
           await fetch(`${node.url}/assign`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(assignBody), signal: AbortSignal.timeout(90000) });
         }
         p.push(node.node_id);
-      } catch (e) { /* 單一等 */ }
+      } catch (e) { console.log(`[v1] dispatch fail ${node.node_id}: ${e.message}`); }
     }
     // 等結果：text 投票等齊 nTargets（或 timeout 25s）；tool 快返（≥1 result）
     const deadline = Date.now() + (nTargets > 1 ? 40000 : 25000);
