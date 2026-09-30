@@ -1487,10 +1487,22 @@ app.post("/v1/chat/completions", async (req, res) => {
     }
     const prompt = useTool ? "" : messagesToPrompt(messages);
     const images = hasImage ? extractImagesFromMessages(messages) : [];
-    // context 防護：估算 prompt tokens，對比網絡內 node 最細可用 ctx（保守）
+    // context 防護 v2 (2026-09-30)：
+    //  - minCtx 用「實際會派工嘅候選 node」入面最細，唔係全網絡最細
+    //    （否則細 ctx node（如 vision 32768）會拖低成個網絡上限，大 prompt 被誤拒）
+    //  - 派工/投票 node 按該 node ctx ≥ estPromptTokens 過濾，防止派超 ctx 任務爆 context
     const estPromptTokens = Math.round(prompt.length / 3.5) + (images.length ? 1024 * images.length : 0);
-    const ctxOptions = [...registry.values()].filter(n => n.account && n.max_context > 0).map(n => n.max_context);
-    const minCtx = ctxOptions.length ? Math.min(...ctxOptions) : 8192;
+    // minCtx = 該 model 實際可用 LLM node（cap/tier 匹配）入面最細 ctx。
+    // ⚠️ 唔好計 adapter nodes（sd-1/searxng）或唔 match 呢個 model 嘅 node —— 計埋會拖低上限。
+    const wantCap = mm.cap || [];
+    const wantTier = mm.tier || [];
+    const llmCtxOptions = [...registry.values()]
+      .filter(n => n.account && n.max_context > 0 &&
+        (wantCap.length === 0 || (n.capabilities || []).some(c => wantCap.includes(c))) &&
+        (mm.freeOnly ? n.free : (wantTier.includes(nodeTier(n)) || n.free)) &&
+        (n.capabilities || []).some(c => ['reasoning','math','analysis','vision'].includes(c)))
+      .map(n => n.max_context);
+    const minCtx = llmCtxOptions.length ? Math.min(...llmCtxOptions) : 65536;
     // swarmai-orch：用戶明揀 + text-only + 超細 ctx → 行拆解派工（唔 413）
     if (mm.orchestrate && !useTool && !hasImage && estPromptTokens > minCtx) {
       return handleOrchestration(req, res, { modelKey, mm, prompt, temperature, max_tokens, stream, stop, reqAcc: reqTok ? accountForToken(reqTok) : null, reqTok, minCtx });
@@ -1509,7 +1521,7 @@ app.post("/v1/chat/completions", async (req, res) => {
     //  freeOnly → 只揀 free node；其他 model（fast/normal）免費 node 都入選（高 grade 優先）
     //  tool request → 只揀 abilities.tools === true 嘅 node（真工具支援，唔好派去 text-only）
     const wantedTiers = mm.tier;
-    let candidates = [...registry.values()].filter(n => n.account && (mm.freeOnly ? n.free : (wantedTiers.includes(nodeTier(n)) || n.free)) && (!useTool || (n.abilities && n.abilities.tools === true)));
+    let candidates = [...registry.values()].filter(n => n.account && (mm.freeOnly ? n.free : (wantedTiers.includes(nodeTier(n)) || n.free)) && (!useTool || (n.abilities && n.abilities.tools === true)) && (useTool || (n.max_context || 0) >= estPromptTokens));
     console.log(`[v1] model=${modelKey} tool=${useTool} stream=${stream} caps=${JSON.stringify(mm.cap)} tier=${JSON.stringify(mm.tier)} reg=${registry.size} cand=${candidates.map(c=>c.node_id+":"+nodeTier(c)+(c.free?"(F)":""))}`)
     if (!candidates.length && !mm.freeOnly) {
       candidates = [...registry.values()].filter(n => n.account); // fallback 平價
