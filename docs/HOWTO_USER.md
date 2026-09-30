@@ -48,12 +48,33 @@ SwarmAI 提供 OpenAI 兼容端點 — 直接 replace 任何 OpenAI client 嘅 b
 - **Base URL**: `https://swarmai.club/swarm/v1`
 - **API key**: `sk-swai-<你條 X-Swarm-Token>`（portal 攞）
 - **Models**:
-  - `swarmai-fast` — 派去 S/A tier 勁機（5090/4090/2080Ti），收費貴（×1.8/×1.3）
-  - `swarmai-normal` — 派去 B/C tier 平機，收費平（×1.0/×0.6）
+  - `swarmai-fast` — 派去 S/A tier 勁機（5090/4090/2080Ti），收費貴（×1.8/×1.3）。✅ 3 部機投票
+  - `swarmai-normal` — 派去 B/C tier 平機，收費平（×1.0/×0.6）。✅ 3 部機投票
+  - `swarmai-free` — 免費 node，唔扣費。✅ 3 部機投票
+  - `swarmai-orch` — 長任務拆解協作（parallel shard）：>24k tokens 長 prompt 自動拆 N 段，每段派去唔同 node（idle-first 平衡）同時處理，最後綜合。快，唔投票。
+  - `swarmai-long` — 超長上下文（sequential chaining × 每段投票）：>24k tokens 拆 N 段，每段 2 部機投票提質，段間接力（段 N 睇到前面摘要 → 有效 64k×N 連貫 context）。慢但連貫。
   - `swarmai-image` — 圖像生成（SD-WebUI/ComfyUI adaptive worker），每張 ~20 SWAI
   - `swarmai-video` — 視訊生成（Wan adapter），每條 ~80 SWAI
-  - `swarmai-orch` — 長任務協作（2026-09-23 新增）：prompt 超出網絡最細 node ctx → router 自動拆解派多個 node → 綜合出最終答案（OpenAI 兼容，支援 stream）
   - vision 自動分流：messages 含 base64 `image_url` → 自動用 qwen2.5-vl
+
+### 揀 Model 指引
+| 你嘅任務 | 用邊個 |
+|---|---|
+| 短問答 / 一般（<24k tokens）| `swarmai-fast`（快）或 `swarmai-free`（免費）|
+| 長文（>24k），每段可獨立答，要快 | `swarmai-orch` |
+| 超長文，要連貫（結尾引用開頭、全文總結）| `swarmai-long` |
+| 生成圖片 | `swarmai-image` |
+| 生成影片 | `swarmai-video` |
+
+**一句分清楚：**
+- **fast / normal / free** = 多部機答**同一題** → 投票（quality）
+- **orch / long** = 拆開**唔同段**俾唔同機做 → 大 context
+  - orch = 同時做（快，唔連貫）
+  - long = 段段接力（連貫，慢）
+
+### 長文 context 能力
+- 所有節點 64k context；orch/long >24k 自動拆段（最多 6 段，每段 ≤ ~39k tokens）→ 總 ~234k tokens
+- orch：各段獨立（唔連貫）；long：段 N 收到前面摘要（連貫 64k×N）
 - **收費**: 按 tokens（in 5000t/SWAI、out 1000t/SWAI × tier 倍率）；balance 唔夠 → 自動 fallback 自己機+free machine（Profile 有派工狀態）；連 fallback 都冇先 402
 
 ### curl 例子

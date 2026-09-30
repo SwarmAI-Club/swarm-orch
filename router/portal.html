@@ -120,10 +120,11 @@ th{color:var(--acc)}
         <div><label style="display:block;margin:0 0 2px;font-size:.78rem">睡眠結束時 (0-23)</label><input id="pf-sleep-e" type="number" min="0" max="23"></div>
         <div><label style="display:block;margin:0 0 2px;font-size:.78rem">預設 model</label>
           <select id="pf-model" style="width:100%;padding:8px;border-radius:8px;border:1px solid #1f2937;background:#0b1220;color:var(--txt)">
-            <option value="swarmai-fast">swarmai-fast（快，貴）</option>
-            <option value="swarmai-normal">swarmai-normal（平）</option>
-            <option value="swarmai-free">swarmai-free（免費 node，唔扣費）</option>
-            <option value="swarmai-orch">swarmai-orch（長任務拆解協作）</option>
+            <option value="swarmai-fast">swarmai-fast（快，3機投票）</option>
+            <option value="swarmai-normal">swarmai-normal（平，3機投票）</option>
+            <option value="swarmai-free">swarmai-free（免費 node，3機投票）</option>
+            <option value="swarmai-orch">swarmai-orch（長文拆段並行，快）</option>
+            <option value="swarmai-long">swarmai-long（超長文連貫，接力）</option>
             <option value="swarmai-image">swarmai-image（圖像生成）</option>
           </select>
         </div>
