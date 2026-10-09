@@ -497,6 +497,14 @@ const nodes = require(CONFIG);
 const app = express();
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+// ---- CORS（dashboard 需要跨站讀 /admin/*；OPTIONS 唔好被 auth 擋）----
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-swarm-token, Authorization");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
 // ---- Auth: all endpoints require X-Swarm-Token ----
 app.use((req, res, next) => {
   const p0 = req.path;
@@ -2563,6 +2571,14 @@ app.post("/admin/promo", (req, res) => {
   db.prepare("INSERT INTO promotions(code,kind,scope,value,valid_from,valid_to,max_uses,per_user) VALUES(?,?,?,?,?,?,?,?)")
     .run(String(code), kind || "discount", scope || "all", Number(value || 1), valid_from || Date.now(), valid_to || null, Number(max_uses || 0), Number(per_user === undefined ? 1 : per_user));
   res.json({ ok: true, code });
+});
+
+// admin promos 全表（dashboard 用，含 used 數）—— 經 swarmai.club/swarm/admin/promos
+app.get("/admin/promos", (req, res) => {
+  const t = req.get("x-swarm-token");
+  if (t !== NET_TOKEN) return res.status(403).json({ ok: false, error: "admin only" });
+  const rows = db.prepare("SELECT code,kind,scope,value,used,max_uses,per_user,valid_from,valid_to FROM promotions ORDER BY rowid").all();
+  res.json({ ok: true, promos: rows });
 });
 
 // 用戶兌換 coupon（reward kind → 加 token）
