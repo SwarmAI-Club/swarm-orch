@@ -39,8 +39,8 @@
 | main | qwythos-1m-main @:8087 | **65536** | 2 × 65536 | ~23 | `agent-core/llama-launch/main-8087.sh`（`--parallel 2 -c 131072`）|
 | rtx2080ti | qwythos-1m @:8087 | **65536** | 1 | ~17 | `~/llama-8087.sh`（SSH ubuntu@<ip>）|
 | rtx3060 | qwythos-1m @:8080 | **65536** | 1 | ~30 | `~/llama-8080.sh`（SSH ubuntu@<ip>）|
-| rtx2060a | qwythos-1m @:8087 | **65536** | 1 | ~28 | `/opencode/llama-8087.sh`（wsl via marco@<ip>）|
-| rtx2060b | qwythos-1m @:8087 | **65536** | 1 | ~30 | `/opencode/llama-8087.sh`（wsl via marco@<ip>）|
+| rtx2060a | qwythos-1m @:8087 | **65536** | 1 | ~28 | `/opencode/llama-8087.sh`（wsl via <user>@<ssh-host>）|
+| rtx2060b | qwythos-1m @:8087 | **65536** | 1 | ~30 | `/opencode/llama-8087.sh`（wsl via <user>@<ssh-host>）|
 | main vision | qwen2.5-vl @:8090 | 32768 | 4 | — | desktop-agent /screenshot 用 |
 
 > ⚠️ main 一定要 `-c 131072 --parallel 2` 先做到 2×65536；`-c 65536 --parallel 2` 只會得 32768×2。

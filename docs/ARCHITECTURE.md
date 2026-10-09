@@ -50,7 +50,7 @@
 | rtx2060b | wsl `/opencode/llama-8087.sh` | — |
 
 > ⚠️ main 一定要 `-c 131072 --parallel 2`（`--parallel N` 會分 ctx；`65536,2` = 32768×2）。
-> ⚠️ 2060a/b 冇直接 WSL SSH → 經 `sshpass marco@<ip>/<ip>` + `wsl -d Ubuntu -u root -- sh -c`（多命令用 base64，防 cmd.exe 拆引號）。
+> ⚠️ 2060a/b 冇直接 WSL SSH → 經 `sshpass <user>@<ssh-host>` + `wsl -d Ubuntu -u root -- sh -c`（多命令用 base64，防 cmd.exe 拆引號）。
 > ⚠️ **Worker 起法 `agent-core/swarm-workers-start.sh`**：main + qwen-vision 兩行**保留但 SUSPEND**（`/portal/node_settings` suspend:true → router 唔派）；`rtx2080ti-vl` 加咗行（free vision）；2060a/b caps 有 `vision`；3060/2080ti cap 冇。
 
 ## 2. 角色 / 端口
